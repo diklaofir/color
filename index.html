@@ -8,18 +8,6 @@
 </head>
 <body>
   <main class="app-shell">
-    <section class="toolbar">
-      <div class="title-block">
-        <p class="eyebrow">Image pixel inspector</p>
-        <p class="lede">Load an image, hover a pixel, and use the mouse wheel to zoom.</p>
-      </div>
-
-      <div class="controls">
-        <label class="file-button" for="imageInput">Choose image</label>
-        <input id="imageInput" type="file" accept="image/*" />
-      </div>
-    </section>
-
     <section class="palette-bar" aria-label="Palette controls">
       <label class="palette-control">
         <span>Palette colors</span>
@@ -41,9 +29,13 @@
       </div>
       <div id="lineAnalytics" class="analytics-group" aria-label="Line analytics">
         <div id="lineAnalyticsPanels" class="analytics-panels"></div>
-        <button id="extractLine" type="button" class="extract-button">Extract</button>
-        <button id="drawLine" type="button" class="extract-button">Draw</button>
+        <button id="chooseImageButton" type="button" class="action-button">Choose image</button>
+        <div class="line-action-stack">
+        <button id="drawLine" type="button" class="action-button">Draw</button>
+        <button id="loopLine" type="button" class="action-button">Loop</button>
       </div>
+      <input id="imageInput" type="file" accept="image/*" />
+    </div>
     </section>
 
     <section id="dropZone" class="drop-zone" aria-label="Image drop zone">
@@ -67,7 +59,7 @@
         </div>
 
         <div class="circle-panel">
-          <div class="circle-label">White</div>
+          <div class="circle-label">Current</div>
           <div class="circle-frame">
             <div id="whiteStage" class="image-stage">
               <canvas id="whiteCanvas"></canvas>
@@ -87,8 +79,65 @@
         <div class="hint-text">
           <div id="colorLabel" class="color-label">Hover a pixel</div>
           <div id="coordLabel" class="coord-label">No image loaded</div>
+          <div id="statusLabel" class="status-label hidden">same</div>
         </div>
       </aside>
+    </section>
+
+    <section id="scoreSection" class="score-section" aria-label="Line score chart">
+      <div class="score-chart-wrap">
+        <div class="score-chart-header">
+          <div id="scoreChartSubtitle" class="score-chart-subtitle"></div>
+        </div>
+        <div id="scoreChart" class="score-chart"></div>
+      </div>
+    </section>
+
+    <section class="advanced-section" aria-label="Advanced controls">
+      <div class="advanced-header">
+        <div class="advanced-title">Advanced controls</div>
+        <div class="advanced-subtitle">Score [target, current] pairs by the dominant color on the current line.</div>
+      </div>
+      <div class="advanced-grid">
+        <label class="advanced-control" for="minDistance">
+          <span>Min distance</span>
+          <input id="minDistance" type="number" min="0" step="1" value="20" />
+        </label>
+
+        <div class="score-rules">
+          <div class="score-rules-title">Score rules</div>
+          <table class="score-rules-table" aria-label="Score rules">
+            <thead>
+              <tr>
+                <th scope="col">Condition</th>
+                <th scope="col">Score</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>current == dominant</td>
+                <td><input id="scoreRuleCurrentDominant" type="number" step="1" value="0" /></td>
+              </tr>
+              <tr>
+                <td>target == dominant</td>
+                <td><input id="scoreRuleTargetDominant" type="number" step="1" value="1" /></td>
+              </tr>
+              <tr>
+                <td>target == current, non-dominant</td>
+                <td><input id="scoreRuleSameNonDominant" type="number" step="1" value="-1" /></td>
+              </tr>
+              <tr>
+                <td>otherwise</td>
+                <td><input id="scoreRuleOtherwise" type="number" step="1" value="0" /></td>
+              </tr>
+              <tr>
+                <td>length multiplier (X)</td>
+                <td><input id="scoreRuleLengthMultiplier" type="number" min="1" step="0.1" value="2" /></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
   </main>
