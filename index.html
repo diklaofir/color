@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pixel Hover Inspector</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="app-shell">
+    <section class="toolbar">
+      <div class="title-block">
+        <p class="eyebrow">Image pixel inspector</p>
+        <p class="lede">Load an image, hover a pixel, and use the mouse wheel to zoom.</p>
+      </div>
+
+      <div class="controls">
+        <label class="file-button" for="imageInput">Choose image</label>
+        <input id="imageInput" type="file" accept="image/*" />
+      </div>
+    </section>
+
+    <section class="palette-bar" aria-label="Palette controls">
+      <label class="palette-control">
+        <span>Palette colors</span>
+        <input id="paletteCount" type="number" min="2" max="32" step="1" value="3" />
+      </label>
+      <div class="palette-modes" role="group" aria-label="Palette mode">
+        <button id="modeClosest" type="button" class="mode-button active">Closest</button>
+        <button id="modeDithered" type="button" class="mode-button">Dithered (Floyd)</button>
+      </div>
+      <div class="range-group" aria-label="Perimeter range">
+        <label class="range-control">
+          <span>From <strong id="rangeFromValue">1</strong></span>
+          <input id="rangeFrom" type="range" min="1" max="1" step="1" value="1" />
+        </label>
+        <label class="range-control">
+          <span>To <strong id="rangeToValue">1</strong></span>
+          <input id="rangeTo" type="range" min="1" max="1" step="1" value="1" />
+        </label>
+      </div>
+      <div id="lineAnalytics" class="analytics-group" aria-label="Line analytics">
+        <div id="lineAnalyticsPanels" class="analytics-panels"></div>
+        <button id="extractLine" type="button" class="extract-button">Extract</button>
+        <button id="drawLine" type="button" class="extract-button">Draw</button>
+      </div>
+    </section>
+
+    <section id="dropZone" class="drop-zone" aria-label="Image drop zone">
+      <div class="drop-copy" id="dropCopy">
+        <strong>Drop an image here</strong>
+        <span>or use the file picker above. Wheel to zoom once loaded.</span>
+      </div>
+
+      <div id="viewer" class="viewer hidden">
+        <div class="circle-panel">
+          <div class="circle-label">Image</div>
+          <div class="circle-frame">
+            <div id="imageStage" class="image-stage">
+              <canvas id="imageCanvas"></canvas>
+            </div>
+            <div id="imageOverlay" class="overlay" aria-hidden="true">
+              <div id="imageRangeOverlay" class="range-overlay"></div>
+              <div id="imagePixelBox" class="pixel-box"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="circle-panel">
+          <div class="circle-label">White</div>
+          <div class="circle-frame">
+            <div id="whiteStage" class="image-stage">
+              <canvas id="whiteCanvas"></canvas>
+            </div>
+            <div id="whiteOverlay" class="overlay" aria-hidden="true">
+              <div id="whiteRangeOverlay" class="range-overlay"></div>
+              <div id="whitePixelBox" class="pixel-box"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <aside id="hint" class="hint hidden" aria-live="polite">
+        <div class="swatch-wrap">
+          <div id="swatch" class="swatch"></div>
+        </div>
+        <div class="hint-text">
+          <div id="colorLabel" class="color-label">Hover a pixel</div>
+          <div id="coordLabel" class="coord-label">No image loaded</div>
+        </div>
+      </aside>
+    </section>
+
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
