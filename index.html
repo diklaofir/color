@@ -29,13 +29,16 @@
       </div>
       <div id="lineAnalytics" class="analytics-group" aria-label="Line analytics">
         <div id="lineAnalyticsPanels" class="analytics-panels"></div>
-        <button id="chooseImageButton" type="button" class="action-button">Choose image</button>
+        <div class="line-action-column">
+          <button id="chooseImageButton" type="button" class="action-button">Choose image</button>
+          <button id="exportButton" type="button" class="action-button">Export 0</button>
+        </div>
         <div class="line-action-stack">
-        <button id="drawLine" type="button" class="action-button">Draw</button>
-        <button id="loopLine" type="button" class="action-button">Loop</button>
+          <button id="drawLine" type="button" class="action-button">Draw</button>
+          <button id="loopLine" type="button" class="action-button">Loop</button>
+        </div>
+        <input id="imageInput" type="file" accept="image/*" />
       </div>
-      <input id="imageInput" type="file" accept="image/*" />
-    </div>
     </section>
 
     <section id="dropZone" class="drop-zone" aria-label="Image drop zone">

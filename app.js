@@ -34,6 +34,7 @@ const lineAnalyticsPanels = document.getElementById('lineAnalyticsPanels');
 const chooseImageButton = document.getElementById('chooseImageButton');
 const drawLineButton = document.getElementById('drawLine');
 const loopLineButton = document.getElementById('loopLine');
+const exportButton = document.getElementById('exportButton');
 const dropZone = document.getElementById('dropZone');
 const dropCopy = document.getElementById('dropCopy');
 const scoreChart = document.getElementById('scoreChart');
@@ -68,10 +69,14 @@ let loadedHeight = 0;
 let hovered = false;
 let lastPointer = null;
 let scoreExpanded = false;
+let targetLineExpanded = false;
+let currentLineExpanded = false;
 let scoreChartRevision = 0;
 let scoreChartCacheKey = null;
 let scoreChartActiveTo = null;
 let scoreChartHighestToValue = null;
+let scoreChartHidden = false;
+let exportedToValues = [];
 let loopActive = false;
 let loopTimer = null;
 let zoom = 1;
@@ -461,32 +466,20 @@ function updateScoreChartSelection(toValue) {
   scoreChartActiveTo = nextActiveTo;
 }
 
-function renderScoreChart() {
-  if (!scoreChart) {
+function updateScoreChartSubtitle(highestToValue) {
+  if (!scoreChartSubtitle) {
     return;
   }
 
-  if (!loadedWidth || !loadedHeight || perimeterPoints.length === 0 || currentPaletteCenters.length === 0) {
-    scoreChart.innerHTML = '';
-    if (scoreChartSubtitle) {
-      scoreChartSubtitle.textContent = '';
-    }
-    scoreChartCacheKey = null;
-    scoreChartActiveTo = null;
-    scoreChartHighestToValue = null;
-    return;
-  }
+  const displayValue = highestToValue ?? scoreChartHighestToValue;
+  scoreChartSubtitle.innerHTML = `
+    <span class="score-chart-highest">Highest:</span>
+    <button type="button" class="score-chart-to-button" data-to="${displayValue ?? ''}" ${displayValue === null ? 'disabled' : ''}>${displayValue ?? '--'}</button>
+    <button type="button" class="score-chart-hide-button" data-action="toggle-chart">${scoreChartHidden ? 'show' : 'hide'}</button>
+  `;
+}
 
-  const fromValue = clampInt(rangeFromInput.value, 1, perimeterCount, 1);
-  const currentToValue = clampInt(rangeToInput.value, 1, perimeterCount, 1);
-  const minDistance = getMinDistanceValue(perimeterCount);
-  const cacheKey = `${scoreChartRevision}:${fromValue}`;
-
-  if (scoreChartCacheKey === cacheKey && scoreChart.innerHTML) {
-    updateScoreChartSelection(currentToValue);
-    return;
-  }
-
+function computeScoreChartStats(fromValue, minDistance) {
   const paletteLookup = buildPaletteLookup(currentPaletteKeys);
   const imageData = imageCtx.getImageData(0, 0, loadedWidth, loadedHeight).data;
   const whiteData = whiteCtx.getImageData(0, 0, loadedWidth, loadedHeight).data;
@@ -541,6 +534,56 @@ function renderScoreChart() {
     highestToValue = bestEligibleToValue;
   }
 
+  return {
+    axisValueBottom: minScore < 0 ? minScore : 0,
+    axisValueTop: maxScore > 0 ? maxScore : 0,
+    highestToValue,
+    maxScore,
+    minScore,
+    scores,
+  };
+}
+
+function renderScoreChart() {
+  if (!scoreChart) {
+    return;
+  }
+
+  if (!loadedWidth || !loadedHeight || perimeterPoints.length === 0 || currentPaletteCenters.length === 0) {
+    scoreChart.innerHTML = '';
+    scoreChartCacheKey = null;
+    scoreChartActiveTo = null;
+    scoreChartHighestToValue = null;
+    updateScoreChartSubtitle(null);
+    return;
+  }
+
+  const fromValue = clampInt(rangeFromInput.value, 1, perimeterCount, 1);
+  const currentToValue = clampInt(rangeToInput.value, 1, perimeterCount, 1);
+  const minDistance = getMinDistanceValue(perimeterCount);
+  const cacheKey = `${scoreChartRevision}:${fromValue}`;
+
+  if (scoreChartHidden) {
+    const { highestToValue } = computeScoreChartStats(fromValue, minDistance);
+    scoreChartHighestToValue = highestToValue;
+    updateScoreChartSubtitle(highestToValue);
+    scoreChart.innerHTML = '';
+    scoreChartCacheKey = null;
+    scoreChartActiveTo = null;
+    return;
+  }
+
+  if (scoreChartCacheKey === cacheKey && scoreChart.innerHTML) {
+    updateScoreChartSelection(currentToValue);
+    return;
+  }
+
+  const { axisValueBottom, axisValueTop, highestToValue, maxScore, minScore, scores } =
+    computeScoreChartStats(fromValue, minDistance);
+
+  scoreChartHighestToValue = highestToValue;
+  updateScoreChartSubtitle(highestToValue);
+
   const graphWidth = Math.max(520, perimeterCount * 18 + 90);
   const graphHeight = 1800;
   const graphPadding = { top: 26, right: 18, bottom: 34, left: 38 };
@@ -554,9 +597,6 @@ function renderScoreChart() {
       : maxScore <= 0
         ? graphPadding.top
         : graphHeight - graphPadding.bottom - ((0 - minScore) / valueRange) * graphInnerHeight;
-
-  const axisValueTop = maxScore > 0 ? maxScore : 0;
-  const axisValueBottom = minScore < 0 ? minScore : 0;
 
   scoreChart.innerHTML = `
     <div class="score-graph">
@@ -616,10 +656,6 @@ function renderScoreChart() {
   `;
   scoreChartCacheKey = cacheKey;
   scoreChartActiveTo = currentToValue;
-  scoreChartHighestToValue = highestToValue;
-  if (scoreChartSubtitle) {
-    scoreChartSubtitle.innerHTML = `Highest: <button type="button" class="score-chart-to-button" data-to="${highestToValue}">${highestToValue}</button>`;
-  }
 }
 
 function setToValue(toValue) {
@@ -834,19 +870,61 @@ function renderLineAnalytics() {
     </div>
   `;
 
-  lineAnalyticsPanels.innerHTML = `
-    <div class="analytics-panel">
-      <div class="analytics-title">Target line</div>
+  const targetLinePanel = `
+    <button
+      id="targetLineToggle"
+      type="button"
+      class="analytics-title analytics-toggle"
+      aria-expanded="${targetLineExpanded ? 'true' : 'false'}"
+    >
+      Target line
+    </button>
+    <div class="analytics-collapsible ${targetLineExpanded ? 'expanded' : 'collapsed'}">
       <div class="analytics-list">${imageRows}</div>
     </div>
-    <div class="analytics-panel">
-      <div class="analytics-title">Current line</div>
+  `;
+
+  const currentLinePanel = `
+    <button
+      id="currentLineToggle"
+      type="button"
+      class="analytics-title analytics-toggle"
+      aria-expanded="${currentLineExpanded ? 'true' : 'false'}"
+    >
+      Current line
+    </button>
+    <div class="analytics-collapsible ${currentLineExpanded ? 'expanded' : 'collapsed'}">
       <div class="analytics-list">${whiteRows}</div>
+    </div>
+  `;
+
+  lineAnalyticsPanels.innerHTML = `
+    <div class="analytics-panel">
+      ${targetLinePanel}
+    </div>
+    <div class="analytics-panel">
+      ${currentLinePanel}
     </div>
     <div class="analytics-panel">
       ${scorePanel}
     </div>
   `;
+
+  const targetLineToggle = document.getElementById('targetLineToggle');
+  if (targetLineToggle) {
+    targetLineToggle.addEventListener('click', () => {
+      targetLineExpanded = !targetLineExpanded;
+      renderLineAnalytics();
+    });
+  }
+
+  const currentLineToggle = document.getElementById('currentLineToggle');
+  if (currentLineToggle) {
+    currentLineToggle.addEventListener('click', () => {
+      currentLineExpanded = !currentLineExpanded;
+      renderLineAnalytics();
+    });
+  }
 
   const scoreToggle = document.getElementById('scoreToggle');
   if (scoreToggle) {
@@ -880,17 +958,46 @@ for (const input of advancedControls) {
 if (scoreChartSubtitle) {
   scoreChartSubtitle.addEventListener('click', (event) => {
     const button = event.target.closest('.score-chart-to-button');
-    if (!button) {
+    if (button) {
+      const nextToValue = button.dataset.to;
+      if (!nextToValue) {
+        return;
+      }
+
+      setToValue(nextToValue);
       return;
     }
 
-    const nextToValue = button.dataset.to;
-    if (!nextToValue) {
+    const hideButton = event.target.closest('.score-chart-hide-button');
+    if (!hideButton) {
       return;
     }
 
-    setToValue(nextToValue);
+    scoreChartHidden = !scoreChartHidden;
+    renderScoreChart();
   });
+}
+
+function updateExportButton() {
+  if (exportButton) {
+    exportButton.textContent = `Export ${exportedToValues.length}`;
+    exportButton.disabled = exportedToValues.length === 0;
+  }
+}
+
+function exportToValues() {
+  if (!exportedToValues.length) {
+    return;
+  }
+
+  const lines = [String(exportedToValues.length), ...exportedToValues.map((value) => String(value))];
+  const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = 'to-values.txt';
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 function drawDominantColorLine() {
@@ -926,6 +1033,9 @@ function drawDominantColorLine() {
   if (!dominantKey) {
     return;
   }
+
+  exportedToValues.push(clampInt(rangeToInput.value, 1, perimeterCount, perimeterCount));
+  updateExportButton();
 
   const [r, g, b] = dominantKey.split(',').map((value) => Number.parseInt(value, 10));
   const targetImageData = whiteCtx.getImageData(0, 0, loadedWidth, loadedHeight);
@@ -1079,8 +1189,12 @@ function resetState() {
   }
   currentPaletteCenters = [];
   currentPaletteKeys = [];
+  exportedToValues = [];
+  updateExportButton();
   invalidateScoreChart();
   scoreExpanded = false;
+  targetLineExpanded = false;
+  currentLineExpanded = false;
   stopLoop();
   endDrag();
   panX = 0;
@@ -1288,6 +1402,11 @@ if (loopLineButton) {
 chooseImageButton.addEventListener('click', () => {
   imageInput.click();
 });
+
+if (exportButton) {
+  exportButton.addEventListener('click', exportToValues);
+  updateExportButton();
+}
 
 modeClosestButton.addEventListener('click', () => setQuantizeMode('closest'));
 modeDitheredButton.addEventListener('click', () => setQuantizeMode('dithered'));

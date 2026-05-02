@@ -203,6 +203,11 @@ body {
   gap: 8px;
 }
 
+.line-action-column {
+  display: grid;
+  gap: 8px;
+}
+
 .analytics-panels {
   display: flex;
   flex-wrap: wrap;
@@ -454,8 +459,16 @@ button:hover {
 }
 
 .score-chart-subtitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   color: var(--muted);
   font-size: 0.84rem;
+}
+
+.score-chart-highest {
+  flex: 0 0 auto;
 }
 
 .score-chart-to-button {
@@ -467,6 +480,22 @@ button:hover {
   font: inherit;
   font-weight: 700;
   cursor: pointer;
+}
+
+.score-chart-hide-button {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.78rem;
+  text-transform: lowercase;
+  cursor: pointer;
+}
+
+.score-chart-hide-button:hover {
+  text-decoration: underline;
 }
 
 .score-chart-to-button:hover {
