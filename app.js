@@ -7,10 +7,6 @@ import {
   isInsideCircle as isInsideCircleGeometry,
 } from './geometry.js';
 import {
-  analyzeLinePoints,
-  buildPaletteLookup,
-  getDominantColorIndex,
-  getSelectedLinePoints,
   paintLinePixels,
   rgbKey,
 } from './line_tools.js';
@@ -56,12 +52,38 @@ const colorLabel = document.getElementById('colorLabel');
 const coordLabel = document.getElementById('coordLabel');
 const statusLabel = document.getElementById('statusLabel');
 const defaultImageSrc = 'mona_lisa.PNG';
+const analysisWorker = typeof Worker !== 'undefined'
+  ? new Worker(new URL('./analysis_worker.js', import.meta.url), { type: 'module' })
+  : null;
 
 const imageCtx = imageCanvas.getContext('2d', { willReadFrequently: true });
 const whiteCtx = whiteCanvas.getContext('2d', { willReadFrequently: true });
 const sourceCanvas = document.createElement('canvas');
 const sourceCtx = sourceCanvas.getContext('2d', { willReadFrequently: true });
 const loaderImage = new Image();
+
+if (analysisWorker) {
+  analysisWorker.onmessage = (event) => {
+    const { requestId, result, error, version } = event.data || {};
+    const pending = workerPendingRequests.get(requestId);
+    if (!pending) {
+      return;
+    }
+
+    workerPendingRequests.delete(requestId);
+    if (error) {
+      pending.reject(new Error(error));
+      return;
+    }
+
+    if (version !== workerStateVersion) {
+      pending.resolve(null);
+      return;
+    }
+
+    pending.resolve(result);
+  };
+}
 
 let currentUrl = null;
 let loadedWidth = 0;
@@ -75,14 +97,17 @@ let scoreChartRevision = 0;
 let scoreChartCacheKey = null;
 let scoreChartActiveTo = null;
 let scoreChartHighestToValue = null;
+let scoreChartLastKnownHighestToValue = null;
 let scoreChartHidden = false;
 let exportedToValues = [];
+let lineAnalyticsCacheKey = null;
+let lineAnalyticsLastResult = null;
 let loopActive = false;
 let loopTimer = null;
 let zoom = 1;
 let ignoreNextImageLoad = false;
 let quantizeRequestId = 0;
-let quantizeMode = 'closest';
+let quantizeMode = 'dithered';
 let currentPaletteCenters = [];
 let currentPaletteKeys = [];
 let perimeterPoints = [];
@@ -102,9 +127,58 @@ let dragStartPanX = 0;
 let dragStartPanY = 0;
 const zoomMin = 0.25;
 const zoomMax = 24;
+let workerStateVersion = 0;
+let workerRequestId = 0;
+let scoreChartPendingCacheKey = null;
+let lineAnalyticsPendingCacheKey = null;
+let drawRequestSeq = 0;
+let drawPendingRequestId = 0;
+const workerPendingRequests = new Map();
+
+function postWorkerRequest(type, payload) {
+  if (!analysisWorker) {
+    return Promise.resolve(null);
+  }
+
+  const requestId = ++workerRequestId;
+  const version = workerStateVersion;
+  return new Promise((resolve, reject) => {
+    workerPendingRequests.set(requestId, { resolve, reject });
+    analysisWorker.postMessage({
+      type,
+      requestId,
+      payload,
+      version,
+    });
+  });
+}
+
+function syncAnalysisWorkerState() {
+  if (!analysisWorker) {
+    return;
+  }
+
+  workerStateVersion += 1;
+  analysisWorker.postMessage({
+    type: 'sync-state',
+    payload: {
+      loadedWidth,
+      loadedHeight,
+      circleCenterX,
+      circleCenterY,
+      circleRadius,
+      perimeterCount,
+      perimeterPoints,
+      currentPaletteKeys,
+      imageData: loadedWidth && loadedHeight ? imageCtx.getImageData(0, 0, loadedWidth, loadedHeight).data : null,
+      whiteData: loadedWidth && loadedHeight ? whiteCtx.getImageData(0, 0, loadedWidth, loadedHeight).data : null,
+    },
+    version: workerStateVersion,
+  });
+}
 
 function getPaletteCount() {
-  return clampInt(paletteInput.value, 2, 32, 8);
+  return clampInt(paletteInput.value, 2, 32, 4);
 }
 
 function getMinDistanceValue(maxValue) {
@@ -147,13 +221,13 @@ function getScoreRuleValues() {
       return fallback;
     }
 
-    const parsed = Number.parseInt(input.value, 10);
+    const parsed = Number.parseFloat(input.value);
     return Number.isFinite(parsed) ? parsed : fallback;
   };
 
   return {
     currentDominant: parseRule(scoreRuleCurrentDominantInput, 0),
-    targetDominant: parseRule(scoreRuleTargetDominantInput, 1),
+    targetDominant: parseRule(scoreRuleTargetDominantInput, 1.5),
     sameNonDominant: parseRule(scoreRuleSameNonDominantInput, -1),
     otherwise: parseRule(scoreRuleOtherwiseInput, 0),
     lengthMultiplier: (() => {
@@ -386,61 +460,6 @@ function invalidateScoreChart() {
   scoreChartHighestToValue = null;
 }
 
-function getLineScoreForPoints(linePoints, paletteLookup, imageData, whiteData, analysis = null, scoreRules = null) {
-  if (!loadedWidth || !loadedHeight || perimeterPoints.length === 0 || currentPaletteCenters.length === 0) {
-    return 0;
-  }
-
-  if (!linePoints.length) {
-    return 0;
-  }
-
-  const dominantIndex = analysis
-    ? getDominantColorIndex(analysis.imageCounts)
-    : getDominantColorIndex(
-        analyzeLinePoints({
-          linePoints,
-          width: loadedWidth,
-          imageData,
-          whiteData,
-          paletteLookup,
-          paletteCount: currentPaletteCenters.length,
-        }).imageCounts
-      );
-
-  let lineScore = 0;
-  const activeScoreRules = scoreRules || getScoreRuleValues();
-  for (const point of linePoints) {
-    const index = (point.y * loadedWidth + point.x) * 4;
-    const leftAlpha = imageData[index + 3];
-    if (leftAlpha < 8) {
-      continue;
-    }
-
-    const leftKey = rgbKey(imageData[index], imageData[index + 1], imageData[index + 2]);
-    const targetIndex = paletteLookup.get(leftKey);
-    if (targetIndex === undefined) {
-      continue;
-    }
-
-    const rightAlpha = whiteData[index + 3];
-    const rightKey = rightAlpha >= 8
-      ? rgbKey(whiteData[index], whiteData[index + 1], whiteData[index + 2])
-      : 'white';
-    let currentIndex = rightAlpha >= 8 ? paletteLookup.get(rightKey) : 'white';
-    if (currentIndex === undefined) {
-      currentIndex =
-        whiteData[index] === 255 && whiteData[index + 1] === 255 && whiteData[index + 2] === 255
-          ? 'white'
-          : 'other';
-    }
-
-    lineScore += getPairScore(targetIndex, currentIndex, dominantIndex, activeScoreRules);
-  }
-
-  return lineScore * getLineLengthMultiplier(linePoints, activeScoreRules.lengthMultiplier);
-}
-
 function updateScoreChartSelection(toValue) {
   if (!scoreChart) {
     return;
@@ -471,7 +490,7 @@ function updateScoreChartSubtitle(highestToValue) {
     return;
   }
 
-  const displayValue = highestToValue ?? scoreChartHighestToValue;
+  const displayValue = highestToValue ?? scoreChartHighestToValue ?? scoreChartLastKnownHighestToValue;
   scoreChartSubtitle.innerHTML = `
     <span class="score-chart-highest">Highest:</span>
     <button type="button" class="score-chart-to-button" data-to="${displayValue ?? ''}" ${displayValue === null ? 'disabled' : ''}>${displayValue ?? '--'}</button>
@@ -479,126 +498,23 @@ function updateScoreChartSubtitle(highestToValue) {
   `;
 }
 
-function computeScoreChartStats(fromValue, minDistance) {
-  const paletteLookup = buildPaletteLookup(currentPaletteKeys);
-  const imageData = imageCtx.getImageData(0, 0, loadedWidth, loadedHeight).data;
-  const whiteData = whiteCtx.getImageData(0, 0, loadedWidth, loadedHeight).data;
-  const scoreRules = getScoreRuleValues();
-  const scores = [];
-  let minScore = 0;
-  let maxScore = 0;
-  let highestScore = Number.NEGATIVE_INFINITY;
-  let highestToValue = 1;
-  let bestEligibleScore = Number.NEGATIVE_INFINITY;
-  let bestEligibleToValue = 1;
-
-  for (let toValue = 1; toValue <= perimeterCount; toValue += 1) {
-    const circularDistance = getCircularDistance(fromValue, toValue, perimeterCount);
-    const linePoints = getSelectedLinePoints({
-      rangeFromValue: fromValue,
-      rangeToValue: toValue,
-      perimeterCount,
-      perimeterPoints,
-      isInsideCircle: isInsideCircleAt,
-    });
-    const analysis = analyzeLinePoints({
-      linePoints,
-      width: loadedWidth,
-      imageData,
-      whiteData,
-      paletteLookup,
-      paletteCount: currentPaletteCenters.length,
-    });
-    const dominantIndex = getDominantColorIndex(analysis.imageCounts);
-    const score = getLineScoreForPoints(linePoints, paletteLookup, imageData, whiteData, analysis, scoreRules);
-    scores.push({ toValue, score });
-    minScore = Math.min(minScore, score);
-    maxScore = Math.max(maxScore, score);
-    const currentTotalCount = analysis.whiteCounts.reduce((sum, count) => sum + count, 0) + analysis.whiteCount;
-    const isFullyCurrentDominantLine =
-      currentTotalCount > 0 && analysis.whiteCounts[dominantIndex] === currentTotalCount;
-
-    if (score > highestScore) {
-      highestScore = score;
-      highestToValue = toValue;
-    }
-
-    if (circularDistance >= minDistance && !isFullyCurrentDominantLine && score > bestEligibleScore) {
-      bestEligibleScore = score;
-      bestEligibleToValue = toValue;
-    }
-  }
-
-  if (bestEligibleScore !== Number.NEGATIVE_INFINITY) {
-    highestScore = bestEligibleScore;
-    highestToValue = bestEligibleToValue;
-  }
-
-  return {
-    axisValueBottom: minScore < 0 ? minScore : 0,
-    axisValueTop: maxScore > 0 ? maxScore : 0,
-    highestToValue,
-    maxScore,
-    minScore,
-    scores,
-  };
-}
-
-function renderScoreChart() {
-  if (!scoreChart) {
-    return;
-  }
-
-  if (!loadedWidth || !loadedHeight || perimeterPoints.length === 0 || currentPaletteCenters.length === 0) {
-    scoreChart.innerHTML = '';
-    scoreChartCacheKey = null;
-    scoreChartActiveTo = null;
-    scoreChartHighestToValue = null;
-    updateScoreChartSubtitle(null);
-    return;
-  }
-
-  const fromValue = clampInt(rangeFromInput.value, 1, perimeterCount, 1);
-  const currentToValue = clampInt(rangeToInput.value, 1, perimeterCount, 1);
-  const minDistance = getMinDistanceValue(perimeterCount);
-  const cacheKey = `${scoreChartRevision}:${fromValue}`;
-
-  if (scoreChartHidden) {
-    const { highestToValue } = computeScoreChartStats(fromValue, minDistance);
-    scoreChartHighestToValue = highestToValue;
-    updateScoreChartSubtitle(highestToValue);
-    scoreChart.innerHTML = '';
-    scoreChartCacheKey = null;
-    scoreChartActiveTo = null;
-    return;
-  }
-
-  if (scoreChartCacheKey === cacheKey && scoreChart.innerHTML) {
-    updateScoreChartSelection(currentToValue);
-    return;
-  }
-
-  const { axisValueBottom, axisValueTop, highestToValue, maxScore, minScore, scores } =
-    computeScoreChartStats(fromValue, minDistance);
-
-  scoreChartHighestToValue = highestToValue;
-  updateScoreChartSubtitle(highestToValue);
-
+function buildScoreChartMarkup(result, currentToValue) {
+  const { axisValueBottom, axisValueTop, scores } = result;
   const graphWidth = Math.max(520, perimeterCount * 18 + 90);
   const graphHeight = 1800;
   const graphPadding = { top: 26, right: 18, bottom: 34, left: 38 };
   const graphInnerWidth = graphWidth - graphPadding.left - graphPadding.right;
   const graphInnerHeight = graphHeight - graphPadding.top - graphPadding.bottom;
-  const barWidth = graphInnerWidth / scores.length;
-  const valueRange = Math.max(1, maxScore - minScore);
+  const barWidth = graphInnerWidth / Math.max(1, scores.length);
+  const valueRange = Math.max(1, axisValueTop - axisValueBottom);
   const zeroY =
-    minScore >= 0
+    axisValueBottom >= 0
       ? graphHeight - graphPadding.bottom
-      : maxScore <= 0
+      : axisValueTop <= 0
         ? graphPadding.top
-        : graphHeight - graphPadding.bottom - ((0 - minScore) / valueRange) * graphInnerHeight;
+        : graphHeight - graphPadding.bottom - ((0 - axisValueBottom) / valueRange) * graphInnerHeight;
 
-  scoreChart.innerHTML = `
+  return `
     <div class="score-graph">
       <svg viewBox="0 0 ${graphWidth} ${graphHeight}" aria-label="Line score by To value">
         <line
@@ -654,117 +570,12 @@ function renderScoreChart() {
       </svg>
     </div>
   `;
-  scoreChartCacheKey = cacheKey;
-  scoreChartActiveTo = currentToValue;
 }
 
-function setToValue(toValue) {
-  const nextToValue = clampInt(toValue, 1, Math.max(1, perimeterCount), 1);
-  rangeToInput.value = String(nextToValue);
-  rangeToInput.dataset.touched = 'true';
-  rangeToInput.dispatchEvent(new Event('input', { bubbles: true }));
-}
-
-function stopLoop() {
-  loopActive = false;
-  if (loopTimer !== null) {
-    window.clearTimeout(loopTimer);
-    loopTimer = null;
-  }
-  if (loopLineButton) {
-    loopLineButton.textContent = 'Loop';
-    loopLineButton.classList.remove('active');
-  }
-}
-
-function startLoop() {
-  if (!loopLineButton || loopActive) {
-    return;
-  }
-
-  loopActive = true;
-  loopLineButton.textContent = 'Stop';
-  loopLineButton.classList.add('active');
-
-  const step = () => {
-    if (!loopActive) {
-      return;
-    }
-
-    if (scoreChartHighestToValue === null) {
-      stopLoop();
-      return;
-    }
-
-    setToValue(scoreChartHighestToValue);
-    if (!loopActive) {
-      return;
-    }
-
-    drawDominantColorLine();
-    if (!loopActive) {
-      return;
-    }
-
-    loopTimer = window.setTimeout(step, 0);
-  };
-
-  step();
-}
-
-function toggleLoop() {
-  if (loopActive) {
-    stopLoop();
-    return;
-  }
-
-  startLoop();
-}
-
-function renderLineAnalytics() {
-  if (!lineAnalyticsPanels || !drawLineButton) {
-    return;
-  }
-
-  if (!loadedWidth || !loadedHeight || perimeterPoints.length === 0 || currentPaletteCenters.length === 0) {
-    lineAnalyticsPanels.innerHTML = '';
-    drawLineButton.disabled = true;
-    return;
-  }
-
-  const linePoints = getSelectedLinePoints({
-    rangeFromValue: rangeFromInput.value,
-    rangeToValue: rangeToInput.value,
-    perimeterCount,
-    perimeterPoints,
-    isInsideCircle: isInsideCircleAt,
-  });
-  if (!linePoints.length) {
-    lineAnalyticsPanels.innerHTML = '';
-    drawLineButton.disabled = true;
-    return;
-  }
-
-  const totalPoints = linePoints.length;
+function buildLineAnalyticsMarkup(result) {
+  const { dominantIndex, imageCounts, scoreIngredients, whiteCounts, whiteCount, finalLineScore, lengthMultiplier } = result;
+  const totalPoints = Math.max(1, whiteCounts.reduce((sum, count) => sum + count, 0) + whiteCount);
   const formatShare = (count) => `${count} (${((count / totalPoints) * 100).toFixed(1)}%)`;
-
-  const paletteLookup = buildPaletteLookup(currentPaletteKeys);
-  const imageData = imageCtx.getImageData(0, 0, loadedWidth, loadedHeight).data;
-  const whiteData = whiteCtx.getImageData(0, 0, loadedWidth, loadedHeight).data;
-  const scoreRules = getScoreRuleValues();
-  const { imageCounts, whiteCounts, whiteCount } = analyzeLinePoints({
-    linePoints,
-    width: loadedWidth,
-    imageData,
-    whiteData,
-    paletteLookup,
-    paletteCount: currentPaletteCenters.length,
-  });
-
-  const dominantIndex = getDominantColorIndex(imageCounts);
-  const scoreIngredients = new Map();
-  let rawLineScore = 0;
-  const lengthMultiplier = getLineLengthMultiplier(linePoints, scoreRules.lengthMultiplier);
 
   const getColorLabel = (paletteIndex) => {
     if (paletteIndex === 'white') {
@@ -778,70 +589,14 @@ function renderLineAnalytics() {
     return `Color ${paletteIndex + 1}`;
   };
 
-  for (const point of linePoints) {
-    const index = (point.y * loadedWidth + point.x) * 4;
-    const rightAlpha = whiteData[index + 3];
-    const leftAlpha = imageData[index + 3];
-
-    if (leftAlpha < 8) {
-      continue;
-    }
-
-    const leftKey = rgbKey(imageData[index], imageData[index + 1], imageData[index + 2]);
-    const targetIndex = paletteLookup.get(leftKey);
-    if (targetIndex === undefined) {
-      continue;
-    }
-
-    const rightKey = rightAlpha >= 8
-      ? rgbKey(whiteData[index], whiteData[index + 1], whiteData[index + 2])
-      : 'white';
-    let currentIndex = rightAlpha >= 8 ? paletteLookup.get(rightKey) : 'white';
-    if (currentIndex === undefined) {
-      currentIndex =
-        whiteData[index] === 255 && whiteData[index + 1] === 255 && whiteData[index + 2] === 255
-          ? 'white'
-          : 'other';
-    }
-
-    const pixelScore = getPairScore(targetIndex, currentIndex, dominantIndex, scoreRules);
-
-    rawLineScore += pixelScore;
-
-    const ingredientKey = `${targetIndex}:${currentIndex}`;
-    const ingredient = scoreIngredients.get(ingredientKey) || {
-      targetIndex,
-      currentIndex,
-      count: 0,
-      score: pixelScore,
-    };
-    ingredient.count += 1;
-    scoreIngredients.set(ingredientKey, ingredient);
-  }
-
-  const targetColorIndexes = currentPaletteCenters.map((center, index) => index);
-  const currentColorIndexes = [...targetColorIndexes, 'white'];
-  const scoreRows = targetColorIndexes
-    .flatMap((targetIndex) =>
-      currentColorIndexes.map((currentIndex) => {
-        const score = getPairScore(targetIndex, currentIndex, dominantIndex, scoreRules);
-        const ingredient = scoreIngredients.get(`${targetIndex}:${currentIndex}`);
-        return {
-          targetIndex,
-          currentIndex,
-          count: ingredient ? ingredient.count : 0,
-          score,
-        };
-      })
-    )
+  const scoreRows = (scoreIngredients || [])
     .map((ingredient) => {
       const contribution = ingredient.count * ingredient.score;
       return `<div class="analytics-row"><span>[${getColorLabel(ingredient.targetIndex)}, ${getColorLabel(ingredient.currentIndex)}] x ${ingredient.count}</span><strong>${ingredient.score} each = ${formatSignedScoreValue(contribution)}</strong></div>`;
     })
     .join('');
 
-  const finalLineScore = rawLineScore * lengthMultiplier;
-  let scoreSummaryRows = `
+  const scoreSummaryRows = `
     <div class="analytics-row"><span>Dominant target</span><strong>${getColorLabel(dominantIndex)}</strong></div>
     ${scoreRows}
     <div class="analytics-row"><span>Length factor</span><strong>x${formatScoreValue(lengthMultiplier)}</strong></div>
@@ -898,17 +653,58 @@ function renderLineAnalytics() {
     </div>
   `;
 
-  lineAnalyticsPanels.innerHTML = `
-    <div class="analytics-panel">
+  return `
+    <div class="analytics-panel ${targetLineExpanded ? 'is-expanded' : 'is-collapsed'}" data-panel-key="target">
       ${targetLinePanel}
     </div>
-    <div class="analytics-panel">
+    <div class="analytics-panel ${currentLineExpanded ? 'is-expanded' : 'is-collapsed'}" data-panel-key="current">
       ${currentLinePanel}
     </div>
-    <div class="analytics-panel">
+    <div class="analytics-panel ${scoreExpanded ? 'is-expanded' : 'is-collapsed'}" data-panel-key="score">
       ${scorePanel}
     </div>
   `;
+}
+
+function applyScoreChartResult(result, currentToValue, cacheKey) {
+  if (!result) {
+    scoreChart.innerHTML = '';
+    scoreChartCacheKey = null;
+    scoreChartActiveTo = null;
+    return;
+  }
+
+  scoreChartHighestToValue = result.highestToValue;
+  scoreChartLastKnownHighestToValue = result.highestToValue;
+  updateScoreChartSubtitle(result.highestToValue);
+
+  if (scoreChartHidden) {
+    scoreChart.innerHTML = '';
+    scoreChartCacheKey = null;
+    scoreChartActiveTo = null;
+    return;
+  }
+
+  scoreChart.innerHTML = buildScoreChartMarkup(result, currentToValue);
+  scoreChartCacheKey = cacheKey;
+  scoreChartActiveTo = currentToValue;
+}
+
+function applyLineAnalyticsResult(result) {
+  if (!result || !lineAnalyticsPanels || !drawLineButton) {
+    lineAnalyticsCacheKey = null;
+    lineAnalyticsLastResult = null;
+    if (lineAnalyticsPanels) {
+      lineAnalyticsPanels.innerHTML = '';
+    }
+    if (drawLineButton) {
+      drawLineButton.disabled = true;
+    }
+    return;
+  }
+
+  lineAnalyticsLastResult = result;
+  lineAnalyticsPanels.innerHTML = buildLineAnalyticsMarkup(result);
 
   const targetLineToggle = document.getElementById('targetLineToggle');
   if (targetLineToggle) {
@@ -933,7 +729,189 @@ function renderLineAnalytics() {
       renderLineAnalytics();
     });
   }
+
   drawLineButton.disabled = false;
+}
+
+async function renderScoreChart() {
+  if (!scoreChart) {
+    return;
+  }
+
+  if (!loadedWidth || !loadedHeight || perimeterPoints.length === 0 || currentPaletteCenters.length === 0) {
+    scoreChart.innerHTML = '';
+    scoreChartCacheKey = null;
+    scoreChartActiveTo = null;
+    scoreChartHighestToValue = null;
+    scoreChartLastKnownHighestToValue = null;
+    scoreChartPendingCacheKey = null;
+    updateScoreChartSubtitle(null);
+    return;
+  }
+
+  const fromValue = clampInt(rangeFromInput.value, 1, perimeterCount, 1);
+  const currentToValue = clampInt(rangeToInput.value, 1, perimeterCount, 1);
+  const minDistance = getMinDistanceValue(perimeterCount);
+  const cacheKey = `${scoreChartRevision}:${workerStateVersion}:${fromValue}`;
+
+  if (scoreChartHidden) {
+    scoreChart.innerHTML = '';
+    scoreChartCacheKey = null;
+    scoreChartActiveTo = null;
+    updateScoreChartSubtitle(scoreChartHighestToValue);
+  }
+
+  if (scoreChartCacheKey === cacheKey && scoreChart.innerHTML) {
+    updateScoreChartSelection(currentToValue);
+    return;
+  }
+
+  if (scoreChartPendingCacheKey === cacheKey) {
+    return;
+  }
+
+  scoreChartPendingCacheKey = cacheKey;
+  const requestVersion = workerStateVersion;
+  let result = null;
+  try {
+    result = await postWorkerRequest('compute-score-chart', {
+      fromValue,
+      minDistance,
+      scoreRules: getScoreRuleValues(),
+    });
+  } catch (error) {
+    result = null;
+  }
+
+  if (!result || requestVersion !== workerStateVersion || scoreChartPendingCacheKey !== cacheKey) {
+    if (scoreChartPendingCacheKey === cacheKey) {
+      scoreChartPendingCacheKey = null;
+    }
+    return;
+  }
+
+  scoreChartPendingCacheKey = null;
+  applyScoreChartResult(result, currentToValue, cacheKey);
+}
+
+async function renderLineAnalytics() {
+  if (!lineAnalyticsPanels || !drawLineButton) {
+    return;
+  }
+
+  if (!loadedWidth || !loadedHeight || perimeterPoints.length === 0 || currentPaletteCenters.length === 0) {
+    applyLineAnalyticsResult(null);
+    lineAnalyticsPendingCacheKey = null;
+    return;
+  }
+
+  const fromValue = clampInt(rangeFromInput.value, 1, perimeterCount, 1);
+  const toValue = clampInt(rangeToInput.value, 1, perimeterCount, perimeterCount);
+  const cacheKey = `${workerStateVersion}:${fromValue}:${toValue}`;
+  if (lineAnalyticsCacheKey === cacheKey && lineAnalyticsPanels.innerHTML && lineAnalyticsLastResult) {
+    applyLineAnalyticsResult(lineAnalyticsLastResult);
+    return;
+  }
+  if (lineAnalyticsPendingCacheKey === cacheKey) {
+    return;
+  }
+
+  lineAnalyticsPendingCacheKey = cacheKey;
+  const requestVersion = workerStateVersion;
+  let result = null;
+  try {
+    result = await postWorkerRequest('compute-line-analytics', {
+      fromValue,
+      toValue,
+      scoreRules: getScoreRuleValues(),
+    });
+  } catch (error) {
+    result = null;
+  }
+
+  if (!result || requestVersion !== workerStateVersion || lineAnalyticsPendingCacheKey !== cacheKey) {
+    if (lineAnalyticsPendingCacheKey === cacheKey) {
+      lineAnalyticsPendingCacheKey = null;
+    }
+    return;
+  }
+
+  lineAnalyticsPendingCacheKey = null;
+  if (!result.linePoints || !result.linePoints.length) {
+    applyLineAnalyticsResult(null);
+    return;
+  }
+
+  lineAnalyticsCacheKey = cacheKey;
+  applyLineAnalyticsResult(result);
+}
+
+function setToValue(toValue) {
+  const nextToValue = clampInt(toValue, 1, Math.max(1, perimeterCount), 1);
+  rangeToInput.value = String(nextToValue);
+  rangeToInput.dataset.touched = 'true';
+  rangeToInput.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function stopLoop() {
+  loopActive = false;
+  if (loopTimer !== null) {
+    window.clearTimeout(loopTimer);
+    loopTimer = null;
+  }
+  if (loopLineButton) {
+    loopLineButton.textContent = 'Loop';
+    loopLineButton.classList.remove('active');
+  }
+}
+
+function startLoop() {
+  if (!loopLineButton || loopActive) {
+    return;
+  }
+
+  loopActive = true;
+  loopLineButton.textContent = 'Stop';
+  loopLineButton.classList.add('active');
+
+  const step = async () => {
+    if (!loopActive) {
+      return;
+    }
+
+    if (scoreChartHighestToValue === null) {
+      stopLoop();
+      return;
+    }
+
+    setToValue(scoreChartHighestToValue);
+    if (!loopActive) {
+      return;
+    }
+
+    try {
+      await drawDominantColorLine();
+    } catch (error) {
+      stopLoop();
+      return;
+    }
+    if (!loopActive) {
+      return;
+    }
+
+    loopTimer = window.setTimeout(step, 0);
+  };
+
+  step();
+}
+
+function toggleLoop() {
+  if (loopActive) {
+    stopLoop();
+    return;
+  }
+
+  startLoop();
 }
 
 const advancedControls = [
@@ -1000,41 +978,44 @@ function exportToValues() {
   URL.revokeObjectURL(url);
 }
 
-function drawDominantColorLine() {
+async function drawDominantColorLine() {
   if (!loadedWidth || !loadedHeight) {
     return;
   }
 
-  const linePoints = getSelectedLinePoints({
-    rangeFromValue: rangeFromInput.value,
-    rangeToValue: rangeToInput.value,
-    perimeterCount,
-    perimeterPoints,
-    isInsideCircle: isInsideCircleAt,
-  });
-  if (!linePoints.length || currentPaletteCenters.length === 0) {
+  if (currentPaletteCenters.length === 0) {
     return;
   }
 
-  const paletteLookup = buildPaletteLookup(currentPaletteKeys);
-  const imageData = imageCtx.getImageData(0, 0, loadedWidth, loadedHeight).data;
-  const whiteData = whiteCtx.getImageData(0, 0, loadedWidth, loadedHeight).data;
-  const { imageCounts, whiteCounts } = analyzeLinePoints({
-    linePoints,
-    width: loadedWidth,
-    imageData,
-    whiteData,
-    paletteLookup,
-    paletteCount: currentPaletteCenters.length,
-  });
+  const fromValue = clampInt(rangeFromInput.value, 1, perimeterCount, 1);
+  const toValue = clampInt(rangeToInput.value, 1, perimeterCount, perimeterCount);
+  const requestId = ++drawRequestSeq;
+  drawPendingRequestId = requestId;
+  const requestVersion = workerStateVersion;
+  let result = null;
+  try {
+    result = await postWorkerRequest('compute-draw', {
+      fromValue,
+      toValue,
+    });
+  } catch (error) {
+    result = null;
+  }
 
-  const dominantIndex = getDominantColorIndex(imageCounts);
-  const dominantKey = currentPaletteKeys[dominantIndex];
-  if (!dominantKey) {
+  if (!result || requestVersion !== workerStateVersion || drawPendingRequestId !== requestId) {
+    if (drawPendingRequestId === requestId) {
+      drawPendingRequestId = 0;
+    }
     return;
   }
 
-  exportedToValues.push(clampInt(rangeToInput.value, 1, perimeterCount, perimeterCount));
+  drawPendingRequestId = 0;
+  const { dominantKey, linePoints } = result;
+  if (!dominantKey || !linePoints || !linePoints.length) {
+    return;
+  }
+
+  exportedToValues.push(toValue);
   updateExportButton();
 
   const [r, g, b] = dominantKey.split(',').map((value) => Number.parseInt(value, 10));
@@ -1052,16 +1033,18 @@ function drawDominantColorLine() {
   });
 
   whiteCtx.putImageData(targetImageData, 0, 0);
+  syncAnalysisWorkerState();
   invalidateScoreChart();
 
-  const fromValue = rangeFromInput.value;
+  const previousFromValue = rangeFromInput.value;
   rangeFromInput.value = rangeToInput.value;
-  rangeToInput.value = fromValue;
+  rangeToInput.value = previousFromValue;
   rangeFromInput.dataset.touched = 'true';
   rangeToInput.dataset.touched = 'true';
   setRangeBounds();
 
-  renderAllRangeOverlays();
+  renderLineAnalytics();
+  await renderScoreChart();
 
   if (hovered && lastPointer) {
     renderHoverOverlays(lastPointer.x, lastPointer.y);
@@ -1190,7 +1173,39 @@ function resetState() {
   currentPaletteCenters = [];
   currentPaletteKeys = [];
   exportedToValues = [];
+  lineAnalyticsCacheKey = null;
+  lineAnalyticsLastResult = null;
+  scoreChartHighestToValue = null;
+  scoreChartLastKnownHighestToValue = null;
+  scoreChartCacheKey = null;
+  scoreChartActiveTo = null;
+  if (scoreChart) {
+    scoreChart.innerHTML = '';
+  }
+  updateScoreChartSubtitle(null);
   updateExportButton();
+  workerStateVersion += 1;
+  scoreChartPendingCacheKey = null;
+  lineAnalyticsPendingCacheKey = null;
+  drawPendingRequestId = 0;
+  if (analysisWorker) {
+    analysisWorker.postMessage({
+      type: 'sync-state',
+      version: workerStateVersion,
+      payload: {
+        loadedWidth: 0,
+        loadedHeight: 0,
+        circleCenterX: 0,
+        circleCenterY: 0,
+        circleRadius: 0,
+        perimeterCount: 0,
+        perimeterPoints: [],
+        currentPaletteKeys: [],
+        imageData: null,
+        whiteData: null,
+      },
+    });
+  }
   invalidateScoreChart();
   scoreExpanded = false;
   targetLineExpanded = false;
@@ -1351,6 +1366,7 @@ function quantizeAndRender() {
   imageCanvas.width = loadedWidth;
   imageCanvas.height = loadedHeight;
   imageCtx.putImageData(new ImageData(mapped, loadedWidth, loadedHeight), 0, 0);
+  syncAnalysisWorkerState();
   invalidateScoreChart();
   stopLoop();
 
@@ -1395,7 +1411,9 @@ rangeToInput.addEventListener('input', () => {
   renderAllRangeOverlays();
 });
 
-drawLineButton.addEventListener('click', drawDominantColorLine);
+drawLineButton.addEventListener('click', () => {
+  void drawDominantColorLine();
+});
 if (loopLineButton) {
   loopLineButton.addEventListener('click', toggleLoop);
 }

@@ -195,7 +195,6 @@ body {
   flex-wrap: wrap;
   gap: 12px;
   align-items: flex-start;
-  margin-left: auto;
 }
 
 .line-action-stack {
@@ -212,16 +211,37 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
+  align-items: flex-start;
 }
 
 .analytics-panel {
   display: grid;
   gap: 10px;
-  min-width: 180px;
+  flex: 0 0 280px;
+  width: 280px;
+  height: 60px;
   padding: 12px 14px;
   border-radius: 16px;
   border: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.03);
+  overflow: hidden;
+  transition: height 180ms ease;
+  box-sizing: border-box;
+}
+
+.analytics-panel[data-panel-key="target"],
+.analytics-panel[data-panel-key="current"] {
+  flex-basis: 180px;
+  width: 180px;
+}
+
+.analytics-panel[data-panel-key="score"] {
+  flex-basis: 260px;
+  width: 260px;
+}
+
+.analytics-panel.is-expanded {
+  height: auto;
 }
 
 .analytics-title {

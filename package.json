@@ -1,3 +1,6 @@
 {
-  "type": "module"
+  "type": "module",
+  "scripts": {
+    "duel": "node headless_rules.js"
+  }
 }

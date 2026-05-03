@@ -1,0 +1,3 @@
+file,rules,currentDominant,targetDominant,sameNonDominant,otherwise,lengthMultiplier,matchedRatio,matched,comparable,painted,wrongPainted,whiteRemaining
+0_1_-1_0_2.png,"0,1,-1,0,2",0,1,-1,0,2,0.8490605868693266,84462,99477,95089,10627,4388
+-1_1_-1_0_2.png,"-1,1,-1,0,2",-1,1,-1,0,2,0.5614664696361973,55853,99477,68165,12312,31312
