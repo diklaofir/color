@@ -1,0 +1,32 @@
+Algorithm comparison: expected visual result after about 2000 lines
+
+Conclusion
+- The better expected visual match is string-art-gen-main.
+- Our app is a greedy line scorer, but it is not equivalent to full visual-error minimization.
+- Setting targetDominant = +1 and lengthMultiplier = 1 makes the score more sensible, but it does not make the two systems match.
+
+Why string-art-gen-main is expected to look better
+- It evaluates each candidate chord together with a specific thread color.
+- It does not collapse the decision to "what color is dominant under this line?".
+- For a candidate line, it simulates blending the thread color into the current canvas.
+- It scores the change against the source image using a per-pixel error delta.
+- It chooses the best line/color candidate from a small palette of physical thread colors.
+- It works on a downscaled image and uses a faded stroke model, which is closer to how string art is viewed in practice.
+
+Why our app is not equivalent, even with targetDominant = +1 and lengthMultiplier = 1
+- The paint color is fixed by the line's dominant target color.
+- Color is not a free choice in the scorer.
+- The score is categorical, not a direct RGB or OKLab error delta.
+- The rule set still gives zero weight to some wrong pixels.
+- The algorithm scores the line locally, not the full canvas after applying the line.
+- The score does not ask, "Which available thread color would improve the visible approximation most?"
+
+Practical expectation after 2000 lines
+- Both systems are greedy, so neither guarantees a global optimum.
+- Still, string-art-gen-main should usually produce the better visual match because its local objective is closer to the rendered appearance.
+- Our app may preserve coarse color structure, but it is more likely to get stuck with visible wrong-color regions because the line color is reduced to a dominant target color.
+
+Bottom line
+- No, the two algorithms should not be expected to produce the same result.
+- No, our current score is not equivalent to minimizing visible error just by setting targetDominant = +1 and lengthMultiplier = 1.
+- The main commonality is that both systems make greedy line-by-line choices.
