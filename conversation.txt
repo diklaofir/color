@@ -1,0 +1,341 @@
+I read all six root JS files end to end: `app.js`, `analysis_worker.js`, `geometry.js`, `line_tools.js`, `quantize.js`, and `headless_rules.js`.
+
+This app is an image-to-line-art/string-art style tool. It loads an image, masks it into a circle, reduces it to a small color palette, then lets the user draw straight lines between numbered perimeter points. Each drawn line is painted onto a separate “current” canvas using the dominant target color along that line. Over repeated draws, the white canvas gradually approximates the quantized target image.
+
+**Main App Behavior**
+
+- Starts with `mona_lisa.PNG` by default.
+- Lets the user upload or drag-drop another image.
+- Builds a circular mask around the image and computes numbered perimeter pixels.
+- Quantizes the image into a palette of 2-32 colors using OKLab color space.
+- Supports two quantization modes:
+  - `closest`: nearest palette color.
+  - `dithered`: Floyd-Steinberg style error diffusion.
+- Displays two canvases:
+  - target image: the circular, quantized source image.
+  - current image: initially white inside the circle, then filled by drawn lines.
+- Lets the user choose a `from` and `to` perimeter index.
+- Overlays the selected line on both canvases.
+- Analyzes the selected line:
+  - dominant target color on that line,
+  - current colors already present there,
+  - white remaining,
+  - scoring breakdown.
+- Draws the selected line onto the current canvas using the dominant target color.
+- After drawing, it swaps `from` and `to`, so the next line starts where the last line ended.
+- Computes a score chart for every possible `to` value from the current `from` point.
+- Can automatically loop by repeatedly choosing the highest-scoring next line.
+- Tracks all drawn `to` values and can export them as `to-values.txt`.
+- Supports pan, zoom, hover pixel inspection, color swatches, coordinates, and perimeter index display.
+
+**Scoring Logic**
+
+The app scores candidate lines using configurable rules:
+
+- If the current canvas already has the line’s dominant target color: `currentDominant`
+- If the target pixel is the dominant color: `targetDominant`
+- If current color equals target color but is not dominant: `sameNonDominant`
+- Otherwise: `otherwise`
+- Then multiplies by a length factor so longer lines can be weighted more.
+
+It also rejects candidate lines that are too close on the circle perimeter based on `minDistance`, and avoids selecting lines that are already fully painted with the dominant current color.
+
+**Worker**
+
+`analysis_worker.js` mirrors the scoring and line-analysis logic off the main UI thread. It receives synced canvas state and handles:
+
+- selected-line analysis,
+- draw-line dominant color calculation,
+- full score-chart calculation across all possible destinations.
+
+**Headless Tool**
+
+`headless_rules.js` is a Node CLI simulation version of the app. It can run thousands of automatic line draws for different scoring rule sets, save output PNGs, save selected line sequences, and write a `summary.csv` comparing rule performance.
+
+In short: this is an experimental colored string-art / algorithmic line reconstruction app for approximating a circular, palette-reduced image by repeatedly drawing optimized colored chords between numbered perimeter points.
+
+
+**Short Answer**
+
+`string-art-gen-main` looks better because it is solving a different, more visual problem: it optimizes blended RGB error from translucent threads. Your current app optimizes exact palette-index matches from opaque line overwrites. That difference is big enough to explain the ~85-88% ceiling.
+
+I read `string-art-gen-main/index.js`, `index.html`, `index.css`, `notes.txt`, `README.md`, and checked the linked write-up. I skipped deep-reading `d3.v7.min.js` because it is vendor code; the app only uses D3 for SVG drawing, zoom/pan, and path generation.
+
+**Key Difference**
+
+Your app picks one dominant target color for a line, then writes that color opaquely over every pixel on that line:
+
+[app.js](C:/Users/owner/Documents/USER/color/app.js:981)  
+[headless_rules.js](C:/Users/owner/Documents/USER/color/headless_rules.js:672)
+
+That means every line is a hard overwrite. A line with 60% red target pixels and 40% blue target pixels becomes 100% red if red is dominant. The 40% become wrong-painted unless later overwritten. This creates exactly the plateau shown in your duel output: almost no white remains, but many pixels are wrong-painted.
+
+Your best sample:
+
+```csv
+matched=87868
+comparable=99477
+wrongPainted=10820
+whiteRemaining=789
+matchedRatio=0.8833
+```
+
+So the failure is not “not enough drawing.” You have painted nearly everything. The problem is that the final color per pixel is often the wrong opaque palette color.
+
+**What The Other Repo Does**
+
+`string-art-gen-main` uses a very different model:
+
+- It has multiple fixed thread colors: cyan, magenta, yellow, black, white.
+  [index.js](C:/Users/owner/Documents/USER/color/string-art-gen-main/index.js:377)
+
+- It starts the simulated canvas at grey, not white.
+  [index.js](C:/Users/owner/Documents/USER/color/string-art-gen-main/index.js:372)
+
+- Each candidate line is evaluated by asking: “If I blend this thread color into the current image, does RGB error improve?”
+  [index.js](C:/Users/owner/Documents/USER/color/string-art-gen-main/index.js:91)
+
+- It blends with partial opacity:
+  [index.js](C:/Users/owner/Documents/USER/color/string-art-gen-main/index.js:52)  
+  [index.js](C:/Users/owner/Documents/USER/color/string-art-gen-main/index.js:100)
+
+- It rewards improvements more than it punishes damage:
+  [index.js](C:/Users/owner/Documents/USER/color/string-art-gen-main/index.js:104)
+
+That last point is important. The algorithm allows a line to make some pixels worse if it improves more important pixels elsewhere, because future threads can visually correct through layering. Your current score tries to avoid or penalize wrong exact states, which makes it much more brittle.
+
+The author’s write-up says the same thing conceptually: the algorithm compares the approximation to the original image, chooses the connection that most reduces error, ignores or discounts damage that can be fixed later, and uses downscaling/transparency to simulate visual blur and color mixing. Source: https://michael-crum.com/string_art_generator/
+
+**Why It Looks Better Even If Your Match Ratio Is High**
+
+Your metric is exact quantized-pixel accuracy. That is a harsh digital metric. It asks: “Is this final pixel exactly palette color N?”
+
+String art quality is closer to: “Does local density and blended color look close to the source when viewed as thread?”
+
+The other app benefits from:
+
+- **Layering:** many translucent contributions can approximate intermediate colors.
+- **Anti-aliasing and density:** thin SVG lines visually average together.
+- **Continuous RGB error:** near misses still count as near misses.
+- **Multiple independent threads:** it chooses both the next nail and which color thread should move.
+- **Downscaled perception:** it intentionally optimizes a lower-resolution image, which acts like blur.
+
+Your app’s 88% can still look worse because the remaining 12% are hard wrong-color pixels, often distributed as visible streaks. The other app may have many imperfect pixels too, but they are softly wrong, locally blended, and visually less offensive.
+
+**Main Algorithmic Gap**
+
+Your scoring function is symbolic:
+
+[analysis_worker.js](C:/Users/owner/Documents/USER/color/analysis_worker.js:69)
+
+```js
+if current is dominant: score A
+else if target is dominant: score B
+else if current equals target: score C
+else score D
+```
+
+The other repo’s scoring is photometric:
+
+```js
+new_c = threadColor * fade + currentColor * (1 - fade)
+diff = abs(original - new_c) - abs(current - original)
+```
+
+That is much closer to what the eye sees.
+
+**What I’d Change First**
+
+To get past the plateau, I would stop optimizing exact `matchedRatio` as the primary objective. Keep it as a diagnostic, but change generation to use an RGB/OKLab error delta with alpha blending.
+
+Concretely:
+
+1. Represent current pixels as blended RGB, not palette index.
+2. For each candidate line and candidate thread color, simulate:
+   ```js
+   next = threadColor * alpha + current * (1 - alpha)
+   ```
+3. Score by reduction in target-vs-current error, preferably OKLab distance or squared RGB distance.
+4. Penalize worsening lightly, not equally.
+5. Pick across colors, not just “dominant target color of the line.”
+6. Render with thin/transparent strokes or simulate thread width/density.
+
+Your current duel results are actually a strong signal: the exact-match strategy is mostly saturated. More tuning of `currentDominant,targetDominant,sameNonDominant,otherwise,lengthMultiplier` may move 1-2%, but the better-looking approach needs a different image model, not just better constants.
+
+
+
+
+
+Right, dithering helps, but it solves a different part of the problem.
+
+Dithering makes the **target image** represent intermediate colors using spatial mixtures of palette colors. But your drawing operation is still:
+
+```text
+choose one dominant color for the whole chord
+paint every pixel on that chord with that color
+```
+
+So if the dithered target alternates red/blue/red/blue along a line, the line still gets collapsed to whichever color is dominant on that chord. Dithering increases local color mixture in the target, but your line primitive cannot preserve that mixture because each stroke is still a single opaque color.
+
+In fact, dithering can make the exact-match objective harder for this algorithm. It creates high-frequency palette patterns, while chords are long, coherent, low-frequency marks. A single opaque chord is bad at matching checkerboard-like local dithering unless many later chords happen to cross exactly the minority pixels.
+
+The other repo’s “dither equivalent” is different: it does not require exact palette pixels. It blends translucent cyan/magenta/yellow/black/white strokes and scores continuous RGB error. So a red-ish region can be approximated by many partial contributions, not by requiring each final pixel to equal one quantized dither color.
+
+So your statement is directionally right: dithering is meant to handle mixed colors. But with opaque dominant-color chords, it only helps the target palette reduction. It does not fix the bigger mismatch between:
+
+```text
+dithered target: local mixture of many exact palette pixels
+your stroke: one opaque color over a long line
+```
+
+The likely next improvement is to keep dithering if it looks good visually, but change the scoring/drawing model from exact palette overwrite to blended color-error reduction.
+
+
+
+
+You are not missing the “custom palette” idea. The missing piece is the **simulation scale**.
+
+When the other repo uses alpha blending, it is not necessarily claiming the real thread is translucent. Alpha is a proxy for this:
+
+```text
+one physical thread covers only part of the visual area represented by a pixel
+```
+
+At high enough resolution, an opaque thread is opaque. But when you evaluate the image at a lower resolution, or from viewing distance, each “pixel” represents a small area. A thin opaque thread crossing that area may cover 5-30% of it. The eye/camera averages thread color, background color, adjacent thread colors, gaps, shadows, and highlights. That looks like blending even though the material is opaque.
+
+Your model currently treats a chord like this:
+
+```text
+every crossed pixel becomes exactly the thread color
+```
+
+Physical thread is closer to:
+
+```text
+this line contributes some colored coverage through this local area
+```
+
+That is true for custom colors too. CMYK is not required.
+
+The online examples using non-CMYK colors probably work because they do some combination of:
+
+- choose from a custom thread palette,
+- score each possible next line and color by visual error reduction,
+- render/evaluate at a blurred or downsampled scale,
+- use many thin opaque lines whose density creates tones,
+- avoid requiring exact pixel-level palette matches,
+- let nearby colors optically mix at viewing distance.
+
+Your current algorithm does use a custom palette, but then it reduces each candidate line to its **dominant target color**. That is the bigger limitation. A good custom-palette algorithm should ask:
+
+```text
+For this candidate line, which available thread color improves the visible approximation most?
+```
+
+not:
+
+```text
+What color appears most often under this line?
+```
+
+Those can differ. A line through mostly already-correct red pixels and some badly-missing blue pixels should perhaps be blue, even if red is dominant, because blue reduces current error more.
+
+Dithering helps the target image, but it can hurt your exact-match metric because it creates tiny alternating color decisions. Real string art does not need to match the dither pattern pixel-for-pixel. It needs to match the **local average impression**.
+
+The better direction is:
+
+1. Keep custom palette.
+2. Stop scoring exact palette-index equality as the main objective.
+3. For each line, test every palette color.
+4. Simulate a small contribution, not a full overwrite, for scoring.
+5. Compare against the target in RGB/OKLab after blur or downsampling.
+6. Optionally render the final preview with opaque physical-looking lines, but score using visual-area coverage.
+
+So “alpha” is not about transparent thread. It is a practical approximation of optical mixing, thread width, antialiasing, and viewing distance. You can use that with any custom thread palette.
+
+
+
+
+Mostly because he makes the search space much smaller.
+
+Your app uses **every circle-boundary pixel as a nail**. For a 500-ish pixel image, that can easily be ~1,500 perimeter points. Each step scores almost every possible `to` value.
+
+His app defaults to:
+
+```js
+num_nails = 300
+```
+
+So one generation step considers ~300 possible next nails, not ~1,500. That alone is about **5x**.
+
+There are other speed wins too:
+
+- His algorithm downscales the working image. With defaults, the actual analysis canvas is roughly ~250x250, not the original uploaded resolution.
+- Shorter downscaled lines mean fewer pixels per candidate chord.
+- His line geometry is cached in `graph.line_cache`, so each nail pair’s Bresenham pixels are computed once.
+- Each thread caches its next best move. In steady state, only the thread that just moved needs a full candidate recomputation; the other thread colors can reuse their cached next move.
+- His scoring uses raw numeric RGBA arrays directly. Your UI worker repeatedly builds line analyses, does palette-key string lookups like `"r,g,b"`, counts colors, and then scores symbolic palette states.
+- Your score chart computes the whole chart every time because it is part of the interactive UI. That is useful visually, but expensive during automatic looping.
+
+So the biggest likely cause of the “5x” feeling is not magic algorithmic efficiency. It is probably:
+
+```text
+~300 nails in his app
+vs
+~1500-ish perimeter pixels in yours
+```
+
+That is almost exactly 5x.
+
+If you want the same speed class, the first thing I’d change is to add a real `nailCount` setting and sample evenly around the circle, instead of treating every boundary pixel as a nail. Then cache all line pixel lists for those nails. That would probably speed things up immediately without changing the scoring model.
+
+
+
+
+I’d do the hybrid: keep **your app/repo**, but replace the generation core with the stronger parts of **his algorithm**.
+
+I would not build on his repo directly. His code is good as a prototype, but it is tightly coupled to D3/SVG/UI, fixed CMYKW threads, browser-only generation, and less modular. Your repo already has the better foundation for experiments: custom palette, headless runs, metrics, worker separation, export, and duel infrastructure.
+
+The part to borrow is the algorithmic model:
+
+```text
+candidate = line + thread color
+score = how much this candidate improves the current visual approximation
+apply = add that thread contribution
+repeat
+```
+
+Instead of your current model:
+
+```text
+candidate = line
+color = dominant target color on that line
+score = symbolic palette match rules
+apply = overwrite pixels with dominant color
+repeat
+```
+
+The important tweak is: use his **error-reduction scoring**, but with your **custom palette**.
+
+A practical version:
+
+1. Choose `nailCount`, maybe 300-600, instead of every perimeter pixel.
+2. Quantize or manually define a custom thread palette.
+3. Keep one “thread state” per palette color, each with its own current nail.
+4. For every thread color, find its best next line by visual error reduction.
+5. Pick the globally best thread move.
+6. Apply it to the simulated canvas using partial coverage/alpha for scoring.
+7. Export per-color nail sequences, not just one `to-values.txt`.
+
+That last point matters physically. Your current app changes color per line, but real multicolor thread art usually needs either separate thread paths per color or color passes. His model handles that better: each color thread has its own nail order.
+
+So the answer is:
+
+```text
+Use his optimizer idea.
+Use your custom palette, quantizer, headless tooling, and UI.
+Do not inherit his fixed CMYKW assumption.
+Do not keep your dominant-color overwrite scorer as the main objective.
+```
+
+I’d treat this as a new generation mode, not a rewrite. Keep your existing exact-match engine for comparison, then add a `visual-error` or `thread-blend` mode in headless first. If it beats the current output visually, port it into the worker/UI.
