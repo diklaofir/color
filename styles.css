@@ -206,10 +206,19 @@ input[type="file"] {
 }
 
 .panel-label {
+  display: grid;
+  gap: 4px;
   color: var(--muted);
   font-size: 0.82rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
+}
+
+.panel-label strong {
+  color: var(--text);
+  font-size: 0.95rem;
+  letter-spacing: 0.04em;
+  text-transform: none;
 }
 
 canvas {

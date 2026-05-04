@@ -80,11 +80,13 @@ function buildPaletteCenters(data, width, height, requested) {
   }
 
   const k = Math.min(requested, samples.length);
-  const centers = [samples[(Math.random() * samples.length) | 0].lab.slice()];
+  const centers = [samples[0].lab.slice()];
 
   while (centers.length < k) {
     const distances = new Array(samples.length);
     let total = 0;
+    let bestIndex = 0;
+    let bestDistance = -1;
 
     for (let i = 0; i < samples.length; i += 1) {
       let best = Infinity;
@@ -97,23 +99,19 @@ function buildPaletteCenters(data, width, height, requested) {
       const weighted = best * samples[i].weight;
       distances[i] = weighted;
       total += weighted;
+
+      if (weighted > bestDistance) {
+        bestDistance = weighted;
+        bestIndex = i;
+      }
     }
 
     if (total <= 0) {
-      centers.push(samples[(Math.random() * samples.length) | 0].lab.slice());
+      centers.push(samples[0].lab.slice());
       continue;
     }
 
-    let threshold = Math.random() * total;
-    let chosen = samples[0].lab.slice();
-    for (let i = 0; i < distances.length; i += 1) {
-      threshold -= distances[i];
-      if (threshold <= 0) {
-        chosen = samples[i].lab.slice();
-        break;
-      }
-    }
-    centers.push(chosen);
+    centers.push(samples[bestIndex].lab.slice());
   }
 
   for (let iter = 0; iter < 12; iter += 1) {
@@ -151,7 +149,7 @@ function buildPaletteCenters(data, width, height, requested) {
           clusters[i].b / clusters[i].weight,
         ];
       } else {
-        centers[i] = samples[(Math.random() * samples.length) | 0].lab.slice();
+        centers[i] = samples[0].lab.slice();
       }
     }
   }

@@ -20,11 +20,6 @@
       </label>
 
       <label class="field">
-        <span>Lines / color</span>
-        <input id="linesPerColor" type="number" min="1" step="1" value="1000" />
-      </label>
-
-      <label class="field">
         <span>Nails</span>
         <input id="nailCount" type="number" min="8" step="1" value="256" />
       </label>
@@ -33,6 +28,22 @@
         <span>Minimum distance</span>
         <input id="minDistance" type="range" min="1" max="128" step="1" value="26" />
         <strong id="minDistanceValue">26 nails</strong>
+      </label>
+
+      <label class="field field-slider">
+        <span>Max worsening rounds</span>
+        <input id="worseningRounds" type="range" min="1" max="10" step="1" value="3" />
+        <strong id="worseningRoundsValue">3 rounds</strong>
+      </label>
+
+      <label class="field">
+        <span>Build lines</span>
+        <input id="buildChunkLines" type="number" min="1" step="1" value="10" />
+      </label>
+
+      <label class="field">
+        <span>Refine sweeps</span>
+        <input id="refineChunkSweeps" type="number" min="1" step="1" value="3" />
       </label>
 
       <label class="field field-slider">
@@ -55,7 +66,8 @@
       <div class="action-row">
         <button id="buildButton" type="button" class="action-button">Build stage 1</button>
         <button id="refineLoopButton" type="button" class="action-button">Refine stage 2 loop</button>
-        <button id="stopButton" type="button" class="action-button">Stop</button>
+        <button id="interleavedButton" type="button" class="action-button">Start interleaved</button>
+        <button id="workForeverButton" type="button" class="action-button">Work forever</button>
         <button id="resetButton" type="button" class="action-button">Reset</button>
         <button id="exportButton" type="button" class="action-button">Export paths</button>
       </div>
@@ -79,7 +91,10 @@
           <canvas id="targetCanvas"></canvas>
         </div>
         <div class="panel">
-          <div class="panel-label">Current</div>
+          <div class="panel-label">
+            <span>Current</span>
+            <strong id="currentLinesValue">0 lines</strong>
+          </div>
           <canvas id="currentCanvas"></canvas>
         </div>
       </div>
