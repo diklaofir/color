@@ -3,146 +3,87 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Pixel Hover Inspector</title>
+  <title>Layered Color Path Optimizer</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <main class="app-shell">
-    <section class="palette-bar" aria-label="Palette controls">
-      <label class="palette-control">
+    <section class="control-bar" aria-label="Generation controls">
+      <div class="control-group">
+        <button id="chooseImageButton" type="button" class="action-button">Choose image</button>
+        <input id="imageInput" type="file" accept="image/*" />
+      </div>
+
+      <label class="field">
         <span>Palette colors</span>
         <input id="paletteCount" type="number" min="2" max="32" step="1" value="4" />
       </label>
-      <div class="palette-modes" role="group" aria-label="Palette mode">
-        <button id="modeClosest" type="button" class="mode-button">Closest</button>
-        <button id="modeDithered" type="button" class="mode-button active">Dithered (Floyd)</button>
+
+      <label class="field">
+        <span>Lines / color</span>
+        <input id="linesPerColor" type="number" min="1" step="1" value="1000" />
+      </label>
+
+      <label class="field">
+        <span>Nails</span>
+        <input id="nailCount" type="number" min="8" step="1" value="256" />
+      </label>
+
+      <label class="field field-slider">
+        <span>Minimum distance</span>
+        <input id="minDistance" type="range" min="1" max="128" step="1" value="26" />
+        <strong id="minDistanceValue">26 nails</strong>
+      </label>
+
+      <label class="field field-slider">
+        <span>Cells / thickness</span>
+        <input id="cellsPerThickness" type="range" min="1" max="8" step="1" value="1" />
+        <strong id="cellsPerThicknessValue">1x</strong>
+      </label>
+
+      <label class="field field-slider">
+        <span>Thread thickness</span>
+        <input id="threadThickness" type="range" min="0.1" max="0.3" step="0.01" value="0.3" />
+        <strong id="threadThicknessValue">0.30% of radius</strong>
+      </label>
+
+      <div class="field field-static">
+        <span>Working grid</span>
+        <strong id="workingGridValue">-</strong>
       </div>
-      <div class="range-group" aria-label="Perimeter range">
-        <label class="range-control">
-          <span>From <strong id="rangeFromValue">1</strong></span>
-          <input id="rangeFrom" type="range" min="1" max="1" step="1" value="1" />
-        </label>
-        <label class="range-control">
-          <span>To <strong id="rangeToValue">1</strong></span>
-          <input id="rangeTo" type="range" min="1" max="1" step="1" value="1" />
-        </label>
+
+      <div class="action-row">
+        <button id="buildButton" type="button" class="action-button">Build stage 1</button>
+        <button id="refineLoopButton" type="button" class="action-button">Refine stage 2 loop</button>
+        <button id="stopButton" type="button" class="action-button">Stop</button>
+        <button id="resetButton" type="button" class="action-button">Reset</button>
+        <button id="exportButton" type="button" class="action-button">Export paths</button>
       </div>
-      <div id="lineAnalytics" class="analytics-group" aria-label="Line analytics">
-        <div id="lineAnalyticsPanels" class="analytics-panels"></div>
-        <div class="line-action-column">
-          <button id="chooseImageButton" type="button" class="action-button">Choose image</button>
-          <button id="exportButton" type="button" class="action-button">Export 0</button>
-        </div>
-        <div class="line-action-stack">
-          <button id="drawLine" type="button" class="action-button">Draw</button>
-          <button id="loopLine" type="button" class="action-button">Loop</button>
-        </div>
-        <input id="imageInput" type="file" accept="image/*" />
+
+      <div class="status-strip" aria-live="polite">
+        <div id="phaseLabel" class="status-item">Idle</div>
+        <div id="matchLabel" class="status-item">Match 0.00%</div>
+        <div id="detailLabel" class="status-detail">Drop an image or choose a file to start.</div>
       </div>
     </section>
 
-    <section id="dropZone" class="drop-zone" aria-label="Image drop zone">
-      <div class="drop-copy" id="dropCopy">
+    <section id="dropZone" class="workspace" aria-label="Image workspace">
+      <div id="dropCopy" class="drop-copy">
         <strong>Drop an image here</strong>
-        <span>or use the file picker above. Wheel to zoom once loaded.</span>
+        <span>The optimizer will downscale it, quantize it into a palette, and search layered color paths.</span>
       </div>
 
       <div id="viewer" class="viewer hidden">
-        <div class="circle-panel">
-          <div class="circle-label">Image</div>
-          <div class="circle-frame">
-            <div id="imageStage" class="image-stage">
-              <canvas id="imageCanvas"></canvas>
-            </div>
-            <div id="imageOverlay" class="overlay" aria-hidden="true">
-              <div id="imageRangeOverlay" class="range-overlay"></div>
-              <div id="imagePixelBox" class="pixel-box"></div>
-            </div>
-          </div>
+        <div class="panel">
+          <div class="panel-label">Target</div>
+          <canvas id="targetCanvas"></canvas>
         </div>
-
-        <div class="circle-panel">
-          <div class="circle-label">Current</div>
-          <div class="circle-frame">
-            <div id="whiteStage" class="image-stage">
-              <canvas id="whiteCanvas"></canvas>
-            </div>
-            <div id="whiteOverlay" class="overlay" aria-hidden="true">
-              <div id="whiteRangeOverlay" class="range-overlay"></div>
-              <div id="whitePixelBox" class="pixel-box"></div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <aside id="hint" class="hint hidden" aria-live="polite">
-        <div class="swatch-wrap">
-          <div id="swatch" class="swatch"></div>
-        </div>
-        <div class="hint-text">
-          <div id="colorLabel" class="color-label">Hover a pixel</div>
-          <div id="coordLabel" class="coord-label">No image loaded</div>
-          <div id="statusLabel" class="status-label hidden">same</div>
-        </div>
-      </aside>
-    </section>
-
-    <section id="scoreSection" class="score-section" aria-label="Line score chart">
-      <div class="score-chart-wrap">
-        <div class="score-chart-header">
-          <div id="scoreChartSubtitle" class="score-chart-subtitle"></div>
-        </div>
-        <div id="scoreChart" class="score-chart"></div>
-      </div>
-    </section>
-
-    <section class="advanced-section" aria-label="Advanced controls">
-      <div class="advanced-header">
-        <div class="advanced-title">Advanced controls</div>
-        <div class="advanced-subtitle">Score [target, current] pairs by the dominant color on the current line.</div>
-      </div>
-      <div class="advanced-grid">
-        <label class="advanced-control" for="minDistance">
-          <span>Min distance</span>
-          <input id="minDistance" type="number" min="0" step="1" value="20" />
-        </label>
-
-        <div class="score-rules">
-          <div class="score-rules-title">Score rules</div>
-          <table class="score-rules-table" aria-label="Score rules">
-            <thead>
-              <tr>
-                <th scope="col">Condition</th>
-                <th scope="col">Score</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>current == dominant</td>
-                <td><input id="scoreRuleCurrentDominant" type="number" step="1" value="0" /></td>
-              </tr>
-              <tr>
-                <td>target == dominant</td>
-                <td><input id="scoreRuleTargetDominant" type="number" step="0.1" value="1.5" /></td>
-              </tr>
-              <tr>
-                <td>target == current, non-dominant</td>
-                <td><input id="scoreRuleSameNonDominant" type="number" step="1" value="-1" /></td>
-              </tr>
-              <tr>
-                <td>otherwise</td>
-                <td><input id="scoreRuleOtherwise" type="number" step="1" value="0" /></td>
-              </tr>
-              <tr>
-                <td>length multiplier (X)</td>
-                <td><input id="scoreRuleLengthMultiplier" type="number" min="1" step="0.1" value="2" /></td>
-              </tr>
-            </tbody>
-          </table>
+        <div class="panel">
+          <div class="panel-label">Current</div>
+          <canvas id="currentCanvas"></canvas>
         </div>
       </div>
     </section>
-
   </main>
 
   <script type="module" src="app.js"></script>
