@@ -1,1380 +1,464 @@
 import { oklabToRgb, quantizeImageDataDetailed } from './quantize.js';
-import {
-  buildCirclePerimeter,
-  clamp,
-  clampInt,
-  getLinePoints,
-  isInsideCircle as isInsideCircleGeometry,
-} from './geometry.js';
-import {
-  paintLinePixels,
-  rgbKey,
-} from './line_tools.js';
+import { buildCirclePerimeter, clampInt, isInsideCircle as isInsideCircleGeometry } from './geometry.js';
+import { ColorPathOptimizer } from './optimizer.js';
 
 const imageInput = document.getElementById('imageInput');
-const paletteInput = document.getElementById('paletteCount');
-const modeClosestButton = document.getElementById('modeClosest');
-const modeDitheredButton = document.getElementById('modeDithered');
-const rangeFromInput = document.getElementById('rangeFrom');
-const rangeToInput = document.getElementById('rangeTo');
-const rangeFromValue = document.getElementById('rangeFromValue');
-const rangeToValue = document.getElementById('rangeToValue');
-const minDistanceInput = document.getElementById('minDistance');
-const scoreRuleCurrentDominantInput = document.getElementById('scoreRuleCurrentDominant');
-const scoreRuleTargetDominantInput = document.getElementById('scoreRuleTargetDominant');
-const scoreRuleSameNonDominantInput = document.getElementById('scoreRuleSameNonDominant');
-const scoreRuleOtherwiseInput = document.getElementById('scoreRuleOtherwise');
-const scoreRuleLengthMultiplierInput = document.getElementById('scoreRuleLengthMultiplier');
-const lineAnalytics = document.getElementById('lineAnalytics');
-const lineAnalyticsPanels = document.getElementById('lineAnalyticsPanels');
 const chooseImageButton = document.getElementById('chooseImageButton');
-const drawLineButton = document.getElementById('drawLine');
-const loopLineButton = document.getElementById('loopLine');
+const paletteCountInput = document.getElementById('paletteCount');
+const nailCountInput = document.getElementById('nailCount');
+const minDistanceInput = document.getElementById('minDistance');
+const worseningRoundsInput = document.getElementById('worseningRounds');
+const buildChunkLinesInput = document.getElementById('buildChunkLines');
+const refineChunkSweepsInput = document.getElementById('refineChunkSweeps');
+const cellsPerThicknessInput = document.getElementById('cellsPerThickness');
+const threadThicknessInput = document.getElementById('threadThickness');
+const buildButton = document.getElementById('buildButton');
+const refineLoopButton = document.getElementById('refineLoopButton');
+const interleavedButton = document.getElementById('interleavedButton');
+const workForeverButton = document.getElementById('workForeverButton');
+const resetButton = document.getElementById('resetButton');
 const exportButton = document.getElementById('exportButton');
 const dropZone = document.getElementById('dropZone');
 const dropCopy = document.getElementById('dropCopy');
-const scoreChart = document.getElementById('scoreChart');
-const scoreChartSubtitle = document.getElementById('scoreChartSubtitle');
 const viewer = document.getElementById('viewer');
-const imageStage = document.getElementById('imageStage');
-const imageCanvas = document.getElementById('imageCanvas');
-const imageOverlay = document.getElementById('imageOverlay');
-const imageRangeOverlay = document.getElementById('imageRangeOverlay');
-const imagePixelBox = document.getElementById('imagePixelBox');
-const whiteStage = document.getElementById('whiteStage');
-const whiteCanvas = document.getElementById('whiteCanvas');
-const whiteOverlay = document.getElementById('whiteOverlay');
-const whiteRangeOverlay = document.getElementById('whiteRangeOverlay');
-const whitePixelBox = document.getElementById('whitePixelBox');
-const hint = document.getElementById('hint');
-const swatch = document.getElementById('swatch');
-const colorLabel = document.getElementById('colorLabel');
-const coordLabel = document.getElementById('coordLabel');
-const statusLabel = document.getElementById('statusLabel');
-const defaultImageSrc = 'mona_lisa.PNG';
-const analysisWorker = typeof Worker !== 'undefined'
-  ? new Worker(new URL('./analysis_worker.js', import.meta.url), { type: 'module' })
-  : null;
+const targetCanvas = document.getElementById('targetCanvas');
+const currentCanvas = document.getElementById('currentCanvas');
+const phaseLabel = document.getElementById('phaseLabel');
+const matchLabel = document.getElementById('matchLabel');
+const detailLabel = document.getElementById('detailLabel');
+const minDistanceValue = document.getElementById('minDistanceValue');
+const worseningRoundsValue = document.getElementById('worseningRoundsValue');
+const cellsPerThicknessValue = document.getElementById('cellsPerThicknessValue');
+const threadThicknessValue = document.getElementById('threadThicknessValue');
+const workingGridValue = document.getElementById('workingGridValue');
+const currentLinesValue = document.getElementById('currentLinesValue');
 
-const imageCtx = imageCanvas.getContext('2d', { willReadFrequently: true });
-const whiteCtx = whiteCanvas.getContext('2d', { willReadFrequently: true });
+const targetCtx = targetCanvas.getContext('2d', { willReadFrequently: true });
+const currentCtx = currentCanvas.getContext('2d', { willReadFrequently: true });
 const sourceCanvas = document.createElement('canvas');
 const sourceCtx = sourceCanvas.getContext('2d', { willReadFrequently: true });
 const loaderImage = new Image();
 
-if (analysisWorker) {
-  analysisWorker.onmessage = (event) => {
-    const { requestId, result, error, version } = event.data || {};
-    const pending = workerPendingRequests.get(requestId);
-    if (!pending) {
-      return;
-    }
-
-    workerPendingRequests.delete(requestId);
-    if (error) {
-      pending.reject(new Error(error));
-      return;
-    }
-
-    if (version !== workerStateVersion) {
-      pending.resolve(null);
-      return;
-    }
-
-    pending.resolve(result);
-  };
-}
+const defaultImageSrc = 'mona_lisa.PNG';
+const defaultColorCount = 4;
+const defaultCellsPerThickness = 1;
+const defaultThreadThicknessPercent = 0.3;
+const defaultMaxWorseningRounds = 3;
+const defaultRefineIterations = 1;
+const stage2CandidateSamples = 1;
+const defaultMinDistanceRatio = 0.1;
 
 let currentUrl = null;
+let optimizer = null;
 let loadedWidth = 0;
 let loadedHeight = 0;
-let hovered = false;
-let lastPointer = null;
-let scoreExpanded = false;
-let targetLineExpanded = false;
-let currentLineExpanded = false;
-let scoreChartRevision = 0;
-let scoreChartCacheKey = null;
-let scoreChartActiveTo = null;
-let scoreChartHighestToValue = null;
-let scoreChartLastKnownHighestToValue = null;
-let scoreChartHidden = false;
-let exportedToValues = [];
-let lineAnalyticsCacheKey = null;
-let lineAnalyticsLastResult = null;
-let loopActive = false;
-let loopTimer = null;
-let zoom = 1;
-let ignoreNextImageLoad = false;
-let quantizeRequestId = 0;
-let quantizeMode = 'dithered';
-let currentPaletteCenters = [];
-let currentPaletteKeys = [];
-let perimeterPoints = [];
-let perimeterLookup = new Map();
-let perimeterCount = 1;
-let rangeLastTouched = 'to';
-let circleCenterX = 0;
-let circleCenterY = 0;
-let circleRadius = 0;
-let panX = 0;
-let panY = 0;
-let dragging = false;
-let dragPointerId = null;
-let dragStartX = 0;
-let dragStartY = 0;
-let dragStartPanX = 0;
-let dragStartPanY = 0;
-const zoomMin = 0.25;
-const zoomMax = 24;
-let workerStateVersion = 0;
-let workerRequestId = 0;
-let scoreChartPendingCacheKey = null;
-let lineAnalyticsPendingCacheKey = null;
-let drawRequestSeq = 0;
-let drawPendingRequestId = 0;
-const workerPendingRequests = new Map();
+let abortRequested = false;
+let running = false;
+let refineLoopActive = false;
+let currentSourceReady = false;
+let reloadQueued = false;
+let reloadDebounceHandle = null;
+let stage2IterationsSinceBuild = 0;
+let interleavedActive = false;
+let workForeverActive = false;
+let worktimeStartMs = 0;
+let worktimeAccumulatedMs = 0;
 
-function postWorkerRequest(type, payload) {
-  if (!analysisWorker) {
-    return Promise.resolve(null);
+function startWorktime() {
+  if (worktimeStartMs === 0) {
+    worktimeStartMs = Date.now();
   }
-
-  const requestId = ++workerRequestId;
-  const version = workerStateVersion;
-  return new Promise((resolve, reject) => {
-    workerPendingRequests.set(requestId, { resolve, reject });
-    analysisWorker.postMessage({
-      type,
-      requestId,
-      payload,
-      version,
-    });
-  });
 }
 
-function syncAnalysisWorkerState() {
-  if (!analysisWorker) {
+function pauseWorktime() {
+  if (worktimeStartMs !== 0) {
+    worktimeAccumulatedMs += Date.now() - worktimeStartMs;
+    worktimeStartMs = 0;
+  }
+}
+
+function resetWorktime() {
+  worktimeStartMs = 0;
+  worktimeAccumulatedMs = 0;
+}
+
+function getWorktimeMs() {
+  return worktimeAccumulatedMs + (worktimeStartMs !== 0 ? Date.now() - worktimeStartMs : 0);
+}
+
+function formatPercent(value) {
+  return `${(value * 100).toFixed(2)}%`;
+}
+
+function clampFloat(value, min, max, fallback) {
+  const parsed = Number.parseFloat(value);
+  if (Number.isNaN(parsed)) {
+    return fallback;
+  }
+
+  return Math.max(min, Math.min(max, parsed));
+}
+
+function rgbKey(r, g, b) {
+  return `${r},${g},${b}`;
+}
+
+function getColorCount() {
+  return clampInt(paletteCountInput.value, 2, 32, defaultColorCount);
+}
+
+function getNailCount() {
+  return clampInt(nailCountInput.value, 8, 2048, 256);
+}
+
+function getDefaultMinDistance() {
+  return Math.max(1, Math.round(getNailCount() * defaultMinDistanceRatio));
+}
+
+function getMinDistanceValueSetting() {
+  const maxValue = Math.max(1, Math.floor(getNailCount() / 2));
+  return clampInt(minDistanceInput.value, 1, maxValue, getDefaultMinDistance());
+}
+
+function getMaxWorseningRounds() {
+  return clampInt(worseningRoundsInput.value, 1, 10, defaultMaxWorseningRounds);
+}
+
+function getBuildChunkLines() {
+  return clampInt(buildChunkLinesInput.value, 1, 100000, 10);
+}
+
+function getRefineChunkSweeps() {
+  return clampInt(refineChunkSweepsInput.value, 1, 100000, 3);
+}
+
+function getCellsPerThickness() {
+  return clampInt(cellsPerThicknessInput.value, 1, 8, defaultCellsPerThickness);
+}
+
+function getThreadThicknessPercent() {
+  return clampFloat(threadThicknessInput.value, 0.1, 0.3, defaultThreadThicknessPercent);
+}
+
+function updateMinDistanceReadout() {
+  const maxValue = Math.max(1, Math.floor(getNailCount() / 2));
+  const minDistance = clampInt(minDistanceInput.value, 1, maxValue, getDefaultMinDistance());
+  minDistanceInput.max = String(maxValue);
+  minDistanceInput.value = String(minDistance);
+  minDistanceValue.textContent = `${minDistance} nails`;
+}
+
+function updateWorseningRoundsReadout() {
+  const worseningRounds = getMaxWorseningRounds();
+  worseningRoundsInput.value = String(worseningRounds);
+  worseningRoundsValue.textContent = `${worseningRounds} rounds`;
+}
+
+function updateResolutionReadouts() {
+  const cellsPerThickness = getCellsPerThickness();
+  const threadThicknessPercent = getThreadThicknessPercent();
+  const requestedSize = Math.round((cellsPerThickness * 200) / threadThicknessPercent);
+
+  cellsPerThicknessValue.textContent = `${cellsPerThickness}x`;
+  threadThicknessValue.textContent = `${threadThicknessPercent.toFixed(2)}% of radius`;
+  workingGridValue.textContent = `${requestedSize}px`;
+  updateMinDistanceReadout();
+  updateWorseningRoundsReadout();
+}
+
+function scheduleSourceReload() {
+  if (reloadDebounceHandle !== null) {
+    window.clearTimeout(reloadDebounceHandle);
+  }
+
+  reloadDebounceHandle = window.setTimeout(() => {
+    reloadDebounceHandle = null;
+    if (reloadQueued) {
+      return;
+    }
+
+    reloadQueued = true;
+    window.requestAnimationFrame(() => {
+      reloadQueued = false;
+      if (currentSourceReady && loaderImage.complete && loaderImage.naturalWidth > 0) {
+        void loadSourceFromImage(loaderImage);
+      }
+    });
+  }, 250);
+}
+
+function cancelPendingReload() {
+  if (reloadDebounceHandle !== null) {
+    window.clearTimeout(reloadDebounceHandle);
+    reloadDebounceHandle = null;
+  }
+}
+
+function setPhase(text) {
+  phaseLabel.textContent = text;
+}
+
+function setDetail(text) {
+  detailLabel.textContent = text;
+}
+
+function updateMatch() {
+  const ratio = optimizer ? optimizer.getMatchRatio() : 0;
+  matchLabel.textContent = `Match ${formatPercent(ratio)}`;
+}
+
+function updateCurrentLineCount() {
+  if (!currentLinesValue) {
     return;
   }
 
-  workerStateVersion += 1;
-  analysisWorker.postMessage({
-    type: 'sync-state',
-    payload: {
-      loadedWidth,
-      loadedHeight,
-      circleCenterX,
-      circleCenterY,
-      circleRadius,
-      perimeterCount,
-      perimeterPoints,
-      currentPaletteKeys,
-      imageData: loadedWidth && loadedHeight ? imageCtx.getImageData(0, 0, loadedWidth, loadedHeight).data : null,
-      whiteData: loadedWidth && loadedHeight ? whiteCtx.getImageData(0, 0, loadedWidth, loadedHeight).data : null,
-    },
-    version: workerStateVersion,
-  });
-}
-
-function getPaletteCount() {
-  return clampInt(paletteInput.value, 2, 32, 4);
-}
-
-function getMinDistanceValue(maxValue) {
-  if (!minDistanceInput) {
-    return 0;
+  if (!optimizer) {
+    currentLinesValue.textContent = '0 lines';
+    return;
   }
 
-  return clampInt(minDistanceInput.value, 0, Math.max(0, Math.floor(maxValue / 2)), 20);
+  const totalLines = optimizer.getPaths().reduce((sum, path) => sum + Math.max(0, path.length - 1), 0);
+  currentLinesValue.textContent = `${totalLines} lines`;
 }
 
-function wrapPerimeterValue(value, maxValue) {
-  if (maxValue <= 1) {
-    return 1;
-  }
-
-  const zeroBased = ((value - 1) % maxValue + maxValue) % maxValue;
-  return zeroBased + 1;
-}
-
-function getCircularDistance(fromValue, toValue, maxValue) {
-  if (maxValue <= 1) {
-    return 0;
-  }
-
-  const rawDistance = Math.abs(fromValue - toValue);
-  return Math.min(rawDistance, maxValue - rawDistance);
-}
-
-function rebuildPaletteKeys(centers) {
-  currentPaletteCenters = centers || [];
-  currentPaletteKeys = currentPaletteCenters.map((center) => {
-    const [r, g, b] = oklabToRgb(center[0], center[1], center[2]);
-    return rgbKey(r, g, b);
-  });
-}
-
-function getScoreRuleValues() {
-  const parseRule = (input, fallback) => {
-    if (!input) {
-      return fallback;
-    }
-
-    const parsed = Number.parseFloat(input.value);
-    return Number.isFinite(parsed) ? parsed : fallback;
-  };
-
-  return {
-    currentDominant: parseRule(scoreRuleCurrentDominantInput, 0),
-    targetDominant: parseRule(scoreRuleTargetDominantInput, 1.5),
-    sameNonDominant: parseRule(scoreRuleSameNonDominantInput, -1),
-    otherwise: parseRule(scoreRuleOtherwiseInput, 0),
-    lengthMultiplier: (() => {
-      const parsed = Number.parseFloat(scoreRuleLengthMultiplierInput?.value);
-      return Number.isFinite(parsed) ? parsed : 2;
-    })(),
-  };
-}
-
-function formatScoreValue(value) {
-  const rounded = Math.round(value * 100) / 100;
-  if (Object.is(rounded, -0) || Math.abs(rounded) < 1e-9) {
-    return '0';
-  }
-
-  if (Number.isInteger(rounded)) {
-    return String(rounded);
-  }
-
-  return rounded.toFixed(2).replace(/\.?0+$/, '');
-}
-
-function formatSignedScoreValue(value) {
-  const rounded = Math.round(value * 100) / 100;
-  const prefix = rounded > 0 ? '+' : '';
-  return `${prefix}${formatScoreValue(rounded)}`;
-}
-
-function getLineLengthMultiplier(linePoints, baseMultiplier = null) {
-  const effectiveMultiplier = Number.isFinite(baseMultiplier)
-    ? Math.max(1, baseMultiplier)
-    : Math.max(1, getScoreRuleValues().lengthMultiplier);
-  if (!linePoints || linePoints.length < 2 || circleRadius <= 0) {
-    return 1;
-  }
-
-  const startPoint = linePoints[0];
-  const endPoint = linePoints[linePoints.length - 1];
-  const lineLength = Math.max(1, Math.hypot(endPoint.x - startPoint.x, endPoint.y - startPoint.y));
-  const maxLength = Math.max(1, circleRadius * 2);
-  const ratio = clamp((lineLength - 1) / Math.max(1, maxLength - 1), 0, 1);
-  return 1 + (effectiveMultiplier - 1) * ratio;
-}
-
-function getPairScore(targetIndex, currentIndex, dominantIndex, scoreRules) {
-  if (currentIndex === dominantIndex) {
-    return scoreRules.currentDominant;
-  }
-
-  if (targetIndex === dominantIndex) {
-    return scoreRules.targetDominant;
-  }
-
-  if (currentIndex === targetIndex) {
-    return scoreRules.sameNonDominant;
-  }
-
-  return scoreRules.otherwise;
+function updateButtons() {
+  const canOperate = Boolean(optimizer) && currentSourceReady && !running;
+  buildButton.disabled = !Boolean(optimizer) || !currentSourceReady;
+  buildButton.textContent = running ? 'Stop build' : 'Start build';
+  refineLoopButton.disabled = !canOperate && !refineLoopActive;
+  interleavedButton.disabled = !canOperate && !interleavedActive;
+  workForeverButton.disabled = !canOperate && !workForeverActive;
+  resetButton.disabled = !Boolean(optimizer) || running;
+  exportButton.disabled = !Boolean(optimizer) || running;
+  chooseImageButton.disabled = running;
+  paletteCountInput.disabled = running;
+  nailCountInput.disabled = running;
+  minDistanceInput.disabled = running;
+  worseningRoundsInput.disabled = running;
+  buildChunkLinesInput.disabled = running;
+  refineChunkSweepsInput.disabled = running;
+  cellsPerThicknessInput.disabled = running;
+  threadThicknessInput.disabled = running;
+  refineLoopButton.textContent = refineLoopActive ? 'Stop refine' : 'Start refine';
+  interleavedButton.textContent = interleavedActive ? 'Stop interleaved' : 'Start interleaved';
+  workForeverButton.textContent = workForeverActive ? 'Stop forever' : 'Work forever';
 }
 
 function showViewer() {
   viewer.classList.remove('hidden');
-  hint.classList.remove('hidden');
   dropCopy.classList.add('hidden');
 }
 
 function hideViewer() {
   viewer.classList.add('hidden');
-  hint.classList.add('hidden');
   dropCopy.classList.remove('hidden');
-  imagePixelBox.style.opacity = '0';
-  whitePixelBox.style.opacity = '0';
-  if (statusLabel) {
-    statusLabel.classList.add('hidden');
-  }
-  hovered = false;
-  endDrag();
 }
 
-function renderZoom() {
-  if (!loadedWidth || !loadedHeight) {
+function renderTargetCanvas(mapped, width, height) {
+  targetCanvas.width = width;
+  targetCanvas.height = height;
+  targetCtx.putImageData(new ImageData(mapped, width, height), 0, 0);
+}
+
+function renderCurrentCanvas() {
+  if (!optimizer) {
+    currentCtx.clearRect(0, 0, currentCanvas.width, currentCanvas.height);
+    updateCurrentLineCount();
     return;
   }
 
-  const width = loadedWidth * zoom;
-  const height = loadedHeight * zoom;
-
-  imageCanvas.style.width = `${width}px`;
-  imageCanvas.style.height = `${height}px`;
-  whiteCanvas.style.width = `${width}px`;
-  whiteCanvas.style.height = `${height}px`;
-  imageStage.style.width = `${width}px`;
-  imageStage.style.height = `${height}px`;
-  whiteStage.style.width = `${width}px`;
-  whiteStage.style.height = `${height}px`;
-  imageStage.parentElement.style.width = `${width}px`;
-  imageStage.parentElement.style.height = `${height}px`;
-  whiteStage.parentElement.style.width = `${width}px`;
-  whiteStage.parentElement.style.height = `${height}px`;
+  currentCanvas.width = optimizer.width;
+  currentCanvas.height = optimizer.height;
+  currentCtx.putImageData(new ImageData(optimizer.getCanvasImageData(), optimizer.width, optimizer.height), 0, 0);
+  updateCurrentLineCount();
 }
 
-function centerPanels() {
-  panX = 0;
-  panY = 0;
-  viewer.style.transform = `translate(${panX}px, ${panY}px)`;
+function resetWorkspace() {
+  cancelPendingReload();
+  abortRequested = false;
+  running = false;
+  refineLoopActive = false;
+  interleavedActive = false;
+  workForeverActive = false;
+  stage2IterationsSinceBuild = 0;
+  resetWorktime();
+  optimizer = null;
+  loadedWidth = 0;
+  loadedHeight = 0;
+  currentSourceReady = false;
+  targetCtx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
+  currentCtx.clearRect(0, 0, currentCanvas.width, currentCanvas.height);
+  hideViewer();
+  setPhase('Idle');
+  setDetail('Drop an image or choose a file to start.');
+  updateMatch();
+  updateCurrentLineCount();
+  updateResolutionReadouts();
+  updateButtons();
 }
 
-function applyPan() {
-  viewer.style.transform = `translate(${panX}px, ${panY}px)`;
+function updateCanvasSizing(width, height) {
+  void width;
+  void height;
 }
 
-function endDrag() {
-  dragging = false;
-  dragPointerId = null;
-  viewer.classList.remove('dragging');
-}
-
-function getPerimeterCount() {
-  return perimeterPoints.length;
-}
-
-function getPerimeterIndex(x, y) {
-  const key = `${x},${y}`;
-  return perimeterLookup.get(key) || null;
-}
-
-function getPerimeterPoint(index) {
-  if (index < 1 || index > perimeterPoints.length) {
-    return null;
-  }
-
-  return perimeterPoints[index - 1];
-}
-
-function isInsideCircle(x, y) {
-  return loadedWidth > 0 &&
-    loadedHeight > 0 &&
-    isInsideCircleAt(x, y);
-}
-
-function isInsideCircleAt(x, y) {
-  return isInsideCircleGeometry(x, y, loadedWidth, loadedHeight, circleCenterX, circleCenterY, circleRadius);
-}
-
-function clearCanvas(ctx, canvas) {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-}
-
-function renderMaskedImage(ctx, canvas, width, height, sourceData, fillWhite) {
-  canvas.width = width;
-  canvas.height = height;
-  const imageData = ctx.createImageData(width, height);
-  const data = imageData.data;
-
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const index = (y * width + x) * 4;
-      if (!isInsideCircle(x, y)) {
-        data[index + 3] = 0;
-        continue;
-      }
-
-      if (fillWhite) {
-        data[index] = 255;
-        data[index + 1] = 255;
-        data[index + 2] = 255;
-        data[index + 3] = 255;
-      } else {
-        data[index] = sourceData[index];
-        data[index + 1] = sourceData[index + 1];
-        data[index + 2] = sourceData[index + 2];
-        data[index + 3] = sourceData[index + 3];
-      }
-    }
-  }
-
-  ctx.putImageData(imageData, 0, 0);
-}
-
-function drawRangeOverlay(overlay, stageEl, panelWidth, panelHeight) {
-  overlay.innerHTML = '';
-
-  if (!loadedWidth || !loadedHeight || perimeterPoints.length === 0) {
+function syncLiveOptimizerSettings() {
+  if (!optimizer) {
     return;
   }
 
-  const fromValue = clampInt(rangeFromInput.value, 1, perimeterCount, 1);
-  const toValue = clampInt(rangeToInput.value, 1, perimeterCount, perimeterCount);
-  rangeFromValue.textContent = String(fromValue);
-  rangeToValue.textContent = String(toValue);
+  optimizer.minDistance = getMinDistanceValueSetting();
+}
 
-  const startPoint = getPerimeterPoint(fromValue);
-  const endPoint = getPerimeterPoint(toValue);
-  if (!startPoint || !endPoint) {
-    return;
-  }
+function buildTargetColors(mapped, width, height, paletteRgb) {
+  const lookup = new Map();
+  paletteRgb.forEach((rgb, index) => {
+    lookup.set(rgbKey(rgb[0], rgb[1], rgb[2]), index);
+  });
 
-  const stageRect = stageEl.getBoundingClientRect();
-  const overlayRect = overlay.getBoundingClientRect();
-  const scaleX = stageRect.width / loadedWidth;
-  const scaleY = stageRect.height / loadedHeight;
-  const linePoints = getLinePoints(startPoint.x, startPoint.y, endPoint.x, endPoint.y);
+  const targetColors = new Int16Array(width * height);
+  targetColors.fill(-1);
 
-  for (const point of linePoints) {
-    if (!isInsideCircle(point.x, point.y)) {
+  for (let pixel = 0, offset = 0; pixel < targetColors.length; pixel += 1, offset += 4) {
+    if (mapped[offset + 3] < 8) {
       continue;
     }
 
-    const pixel = document.createElement('div');
-    pixel.className = 'range-pixel';
-    pixel.style.left = `${stageRect.left - overlayRect.left + point.x * scaleX}px`;
-    pixel.style.top = `${stageRect.top - overlayRect.top + point.y * scaleY}px`;
-    pixel.style.width = `${Math.max(scaleX, 1)}px`;
-    pixel.style.height = `${Math.max(scaleY, 1)}px`;
-    overlay.appendChild(pixel);
-  }
-}
-
-function renderAllRangeOverlays() {
-  drawRangeOverlay(imageRangeOverlay, imageStage, loadedWidth, loadedHeight);
-  drawRangeOverlay(whiteRangeOverlay, whiteStage, loadedWidth, loadedHeight);
-  renderLineAnalytics();
-  renderScoreChart();
-}
-
-function invalidateScoreChart() {
-  scoreChartRevision += 1;
-  scoreChartCacheKey = null;
-  scoreChartActiveTo = null;
-  scoreChartHighestToValue = null;
-}
-
-function updateScoreChartSelection(toValue) {
-  if (!scoreChart) {
-    return;
-  }
-
-  const nextActiveTo = clampInt(toValue, 1, perimeterCount, 1);
-  if (scoreChartActiveTo === nextActiveTo) {
-    return;
-  }
-
-  if (scoreChartActiveTo !== null) {
-    const previousBar = scoreChart.querySelector(`.chart-bar[data-to="${scoreChartActiveTo}"]`);
-    if (previousBar) {
-      previousBar.classList.remove('is-active');
+    const key = rgbKey(mapped[offset], mapped[offset + 1], mapped[offset + 2]);
+    const paletteIndex = lookup.get(key);
+    if (paletteIndex !== undefined) {
+      targetColors[pixel] = paletteIndex;
     }
   }
 
-  const activeBar = scoreChart.querySelector(`.chart-bar[data-to="${nextActiveTo}"]`);
-  if (activeBar) {
-    activeBar.classList.add('is-active');
-  }
-
-  scoreChartActiveTo = nextActiveTo;
+  return targetColors;
 }
 
-function updateScoreChartSubtitle(highestToValue) {
-  if (!scoreChartSubtitle) {
+async function runBuildChunk(rounds) {
+  if (!optimizer || running) {
     return;
   }
 
-  const displayValue = highestToValue ?? scoreChartHighestToValue ?? scoreChartLastKnownHighestToValue;
-  scoreChartSubtitle.innerHTML = `
-    <span class="score-chart-highest">Highest:</span>
-    <button type="button" class="score-chart-to-button" data-to="${displayValue ?? ''}" ${displayValue === null ? 'disabled' : ''}>${displayValue ?? '--'}</button>
-    <button type="button" class="score-chart-hide-button" data-action="toggle-chart">${scoreChartHidden ? 'show' : 'hide'}</button>
-  `;
-}
+  running = true;
+  abortRequested = false;
 
-function buildScoreChartMarkup(result, currentToValue) {
-  const { axisValueBottom, axisValueTop, scores } = result;
-  const graphWidth = Math.max(520, perimeterCount * 18 + 90);
-  const graphHeight = 1800;
-  const graphPadding = { top: 26, right: 18, bottom: 34, left: 38 };
-  const graphInnerWidth = graphWidth - graphPadding.left - graphPadding.right;
-  const graphInnerHeight = graphHeight - graphPadding.top - graphPadding.bottom;
-  const barWidth = graphInnerWidth / Math.max(1, scores.length);
-  const valueRange = Math.max(1, axisValueTop - axisValueBottom);
-  const zeroY =
-    axisValueBottom >= 0
-      ? graphHeight - graphPadding.bottom
-      : axisValueTop <= 0
-        ? graphPadding.top
-        : graphHeight - graphPadding.bottom - ((0 - axisValueBottom) / valueRange) * graphInnerHeight;
-
-  return `
-    <div class="score-graph">
-      <svg viewBox="0 0 ${graphWidth} ${graphHeight}" aria-label="Line score by To value">
-        <line
-          class="chart-axis"
-          x1="${graphPadding.left}"
-          y1="${graphPadding.top}"
-          x2="${graphPadding.left}"
-          y2="${graphHeight - graphPadding.bottom}"
-        />
-        <line
-          class="chart-axis"
-          x1="${graphPadding.left}"
-          y1="${graphHeight - graphPadding.bottom}"
-          x2="${graphWidth - graphPadding.right}"
-          y2="${graphHeight - graphPadding.bottom}"
-        />
-        ${scores
-          .map((point, index) => {
-            const barHeight = (Math.abs(point.score) / valueRange) * graphInnerHeight;
-            const x = graphPadding.left + index * barWidth;
-            const y = point.score >= 0 ? zeroY - barHeight : zeroY;
-            const isPositive = point.score >= 0;
-            return `
-              <rect
-                class="chart-bar ${isPositive ? 'positive' : 'negative'}${point.toValue === currentToValue ? ' is-active' : ''}"
-                data-to="${point.toValue}"
-                x="${x}"
-                y="${y}"
-                width="${Math.max(barWidth + 0.35, 0.6)}"
-                height="${barHeight}"
-              />
-            `;
-          })
-          .join('')}
-        <text class="chart-label" x="${graphPadding.left}" y="${graphHeight - 4}">1</text>
-        <text
-          class="chart-label"
-          x="${graphWidth - graphPadding.right}"
-          y="${graphHeight - 4}"
-          text-anchor="end"
-        >
-          ${perimeterCount}
-        </text>
-        <text class="chart-label" x="10" y="${graphPadding.top + 4}">${formatScoreValue(axisValueTop)}</text>
-        <text
-          class="chart-label"
-          x="14"
-          y="${graphHeight - graphPadding.bottom}"
-          dominant-baseline="ideographic"
-        >
-          ${formatScoreValue(axisValueBottom)}
-        </text>
-      </svg>
-    </div>
-  `;
-}
-
-function buildLineAnalyticsMarkup(result) {
-  const { dominantIndex, imageCounts, scoreIngredients, whiteCounts, whiteCount, finalLineScore, lengthMultiplier } = result;
-  const totalPoints = Math.max(1, whiteCounts.reduce((sum, count) => sum + count, 0) + whiteCount);
-  const formatShare = (count) => `${count} (${((count / totalPoints) * 100).toFixed(1)}%)`;
-
-  const getColorLabel = (paletteIndex) => {
-    if (paletteIndex === 'white') {
-      return 'White';
-    }
-
-    if (paletteIndex === 'other') {
-      return 'Other';
-    }
-
-    return `Color ${paletteIndex + 1}`;
-  };
-
-  const scoreRows = (scoreIngredients || [])
-    .map((ingredient) => {
-      const contribution = ingredient.count * ingredient.score;
-      return `<div class="analytics-row"><span>[${getColorLabel(ingredient.targetIndex)}, ${getColorLabel(ingredient.currentIndex)}] x ${ingredient.count}</span><strong>${ingredient.score} each = ${formatSignedScoreValue(contribution)}</strong></div>`;
-    })
-    .join('');
-
-  const scoreSummaryRows = `
-    <div class="analytics-row"><span>Dominant target</span><strong>${getColorLabel(dominantIndex)}</strong></div>
-    ${scoreRows}
-    <div class="analytics-row"><span>Length factor</span><strong>x${formatScoreValue(lengthMultiplier)}</strong></div>
-    <div class="analytics-row score-total"><span>Sum</span><strong>${formatSignedScoreValue(finalLineScore)}</strong></div>
-  `;
-
-  const imageRows = currentPaletteCenters
-    .map((center, index) => `<div class="analytics-row"><span>Color ${index + 1}</span><strong>${formatShare(imageCounts[index])}</strong></div>`)
-    .join('');
-  const whiteRows =
-    currentPaletteCenters
-      .map((center, index) => `<div class="analytics-row"><span>Color ${index + 1}</span><strong>${formatShare(whiteCounts[index])}</strong></div>`)
-      .join('') + `<div class="analytics-row"><span>White</span><strong>${formatShare(whiteCount)}</strong></div>`;
-
-  const scorePanel = `
-    <button
-      id="scoreToggle"
-      type="button"
-      class="analytics-title analytics-toggle"
-      aria-expanded="${scoreExpanded ? 'true' : 'false'}"
-    >
-      Score
-    </button>
-    <div class="analytics-collapsible ${scoreExpanded ? 'expanded' : 'collapsed'}">
-      <div class="analytics-list">${scoreSummaryRows}</div>
-    </div>
-  `;
-
-  const targetLinePanel = `
-    <button
-      id="targetLineToggle"
-      type="button"
-      class="analytics-title analytics-toggle"
-      aria-expanded="${targetLineExpanded ? 'true' : 'false'}"
-    >
-      Target line
-    </button>
-    <div class="analytics-collapsible ${targetLineExpanded ? 'expanded' : 'collapsed'}">
-      <div class="analytics-list">${imageRows}</div>
-    </div>
-  `;
-
-  const currentLinePanel = `
-    <button
-      id="currentLineToggle"
-      type="button"
-      class="analytics-title analytics-toggle"
-      aria-expanded="${currentLineExpanded ? 'true' : 'false'}"
-    >
-      Current line
-    </button>
-    <div class="analytics-collapsible ${currentLineExpanded ? 'expanded' : 'collapsed'}">
-      <div class="analytics-list">${whiteRows}</div>
-    </div>
-  `;
-
-  return `
-    <div class="analytics-panel ${targetLineExpanded ? 'is-expanded' : 'is-collapsed'}" data-panel-key="target">
-      ${targetLinePanel}
-    </div>
-    <div class="analytics-panel ${currentLineExpanded ? 'is-expanded' : 'is-collapsed'}" data-panel-key="current">
-      ${currentLinePanel}
-    </div>
-    <div class="analytics-panel ${scoreExpanded ? 'is-expanded' : 'is-collapsed'}" data-panel-key="score">
-      ${scorePanel}
-    </div>
-  `;
-}
-
-function applyScoreChartResult(result, currentToValue, cacheKey) {
-  if (!result) {
-    scoreChart.innerHTML = '';
-    scoreChartCacheKey = null;
-    scoreChartActiveTo = null;
-    return;
-  }
-
-  scoreChartHighestToValue = result.highestToValue;
-  scoreChartLastKnownHighestToValue = result.highestToValue;
-  updateScoreChartSubtitle(result.highestToValue);
-
-  if (scoreChartHidden) {
-    scoreChart.innerHTML = '';
-    scoreChartCacheKey = null;
-    scoreChartActiveTo = null;
-    return;
-  }
-
-  scoreChart.innerHTML = buildScoreChartMarkup(result, currentToValue);
-  scoreChartCacheKey = cacheKey;
-  scoreChartActiveTo = currentToValue;
-}
-
-function applyLineAnalyticsResult(result) {
-  if (!result || !lineAnalyticsPanels || !drawLineButton) {
-    lineAnalyticsCacheKey = null;
-    lineAnalyticsLastResult = null;
-    if (lineAnalyticsPanels) {
-      lineAnalyticsPanels.innerHTML = '';
-    }
-    if (drawLineButton) {
-      drawLineButton.disabled = true;
-    }
-    return;
-  }
-
-  lineAnalyticsLastResult = result;
-  lineAnalyticsPanels.innerHTML = buildLineAnalyticsMarkup(result);
-
-  const targetLineToggle = document.getElementById('targetLineToggle');
-  if (targetLineToggle) {
-    targetLineToggle.addEventListener('click', () => {
-      targetLineExpanded = !targetLineExpanded;
-      renderLineAnalytics();
-    });
-  }
-
-  const currentLineToggle = document.getElementById('currentLineToggle');
-  if (currentLineToggle) {
-    currentLineToggle.addEventListener('click', () => {
-      currentLineExpanded = !currentLineExpanded;
-      renderLineAnalytics();
-    });
-  }
-
-  const scoreToggle = document.getElementById('scoreToggle');
-  if (scoreToggle) {
-    scoreToggle.addEventListener('click', () => {
-      scoreExpanded = !scoreExpanded;
-      renderLineAnalytics();
-    });
-  }
-
-  drawLineButton.disabled = false;
-}
-
-async function renderScoreChart() {
-  if (!scoreChart) {
-    return;
-  }
-
-  if (!loadedWidth || !loadedHeight || perimeterPoints.length === 0 || currentPaletteCenters.length === 0) {
-    scoreChart.innerHTML = '';
-    scoreChartCacheKey = null;
-    scoreChartActiveTo = null;
-    scoreChartHighestToValue = null;
-    scoreChartLastKnownHighestToValue = null;
-    scoreChartPendingCacheKey = null;
-    updateScoreChartSubtitle(null);
-    return;
-  }
-
-  const fromValue = clampInt(rangeFromInput.value, 1, perimeterCount, 1);
-  const currentToValue = clampInt(rangeToInput.value, 1, perimeterCount, 1);
-  const minDistance = getMinDistanceValue(perimeterCount);
-  const cacheKey = `${scoreChartRevision}:${workerStateVersion}:${fromValue}`;
-
-  if (scoreChartHidden) {
-    scoreChart.innerHTML = '';
-    scoreChartCacheKey = null;
-    scoreChartActiveTo = null;
-    updateScoreChartSubtitle(scoreChartHighestToValue);
-  }
-
-  if (scoreChartCacheKey === cacheKey && scoreChart.innerHTML) {
-    updateScoreChartSelection(currentToValue);
-    return;
-  }
-
-  if (scoreChartPendingCacheKey === cacheKey) {
-    return;
-  }
-
-  scoreChartPendingCacheKey = cacheKey;
-  const requestVersion = workerStateVersion;
-  let result = null;
   try {
-    result = await postWorkerRequest('compute-score-chart', {
-      fromValue,
-      minDistance,
-      scoreRules: getScoreRuleValues(),
-    });
-  } catch (error) {
-    result = null;
-  }
+    setPhase('Stage 1: building paths');
+    setDetail(`Building ${rounds} rounds.`);
+    updateButtons();
 
-  if (!result || requestVersion !== workerStateVersion || scoreChartPendingCacheKey !== cacheKey) {
-    if (scoreChartPendingCacheKey === cacheKey) {
-      scoreChartPendingCacheKey = null;
-    }
-    return;
-  }
+    await optimizer.buildRounds(rounds, {
+      yieldEvery: 2,
+      onProgress: (info) => {
+        if (abortRequested) {
+          throw new Error('aborted');
+        }
 
-  scoreChartPendingCacheKey = null;
-  applyScoreChartResult(result, currentToValue, cacheKey);
-}
+        if (info.roundIndex % 4 === 0) {
+          renderCurrentCanvas();
+        }
 
-async function renderLineAnalytics() {
-  if (!lineAnalyticsPanels || !drawLineButton) {
-    return;
-  }
-
-  if (!loadedWidth || !loadedHeight || perimeterPoints.length === 0 || currentPaletteCenters.length === 0) {
-    applyLineAnalyticsResult(null);
-    lineAnalyticsPendingCacheKey = null;
-    return;
-  }
-
-  const fromValue = clampInt(rangeFromInput.value, 1, perimeterCount, 1);
-  const toValue = clampInt(rangeToInput.value, 1, perimeterCount, perimeterCount);
-  const cacheKey = `${workerStateVersion}:${fromValue}:${toValue}`;
-  if (lineAnalyticsCacheKey === cacheKey && lineAnalyticsPanels.innerHTML && lineAnalyticsLastResult) {
-    applyLineAnalyticsResult(lineAnalyticsLastResult);
-    return;
-  }
-  if (lineAnalyticsPendingCacheKey === cacheKey) {
-    return;
-  }
-
-  lineAnalyticsPendingCacheKey = cacheKey;
-  const requestVersion = workerStateVersion;
-  let result = null;
-  try {
-    result = await postWorkerRequest('compute-line-analytics', {
-      fromValue,
-      toValue,
-      scoreRules: getScoreRuleValues(),
-    });
-  } catch (error) {
-    result = null;
-  }
-
-  if (!result || requestVersion !== workerStateVersion || lineAnalyticsPendingCacheKey !== cacheKey) {
-    if (lineAnalyticsPendingCacheKey === cacheKey) {
-      lineAnalyticsPendingCacheKey = null;
-    }
-    return;
-  }
-
-  lineAnalyticsPendingCacheKey = null;
-  if (!result.linePoints || !result.linePoints.length) {
-    applyLineAnalyticsResult(null);
-    return;
-  }
-
-  lineAnalyticsCacheKey = cacheKey;
-  applyLineAnalyticsResult(result);
-}
-
-function setToValue(toValue) {
-  const nextToValue = clampInt(toValue, 1, Math.max(1, perimeterCount), 1);
-  rangeToInput.value = String(nextToValue);
-  rangeToInput.dataset.touched = 'true';
-  rangeToInput.dispatchEvent(new Event('input', { bubbles: true }));
-}
-
-function stopLoop() {
-  loopActive = false;
-  if (loopTimer !== null) {
-    window.clearTimeout(loopTimer);
-    loopTimer = null;
-  }
-  if (loopLineButton) {
-    loopLineButton.textContent = 'Loop';
-    loopLineButton.classList.remove('active');
-  }
-}
-
-function startLoop() {
-  if (!loopLineButton || loopActive) {
-    return;
-  }
-
-  loopActive = true;
-  loopLineButton.textContent = 'Stop';
-  loopLineButton.classList.add('active');
-
-  const step = async () => {
-    if (!loopActive) {
-      return;
-    }
-
-    if (scoreChartHighestToValue === null) {
-      stopLoop();
-      return;
-    }
-
-    setToValue(scoreChartHighestToValue);
-    if (!loopActive) {
-      return;
-    }
-
-    try {
-      await drawDominantColorLine();
-    } catch (error) {
-      stopLoop();
-      return;
-    }
-    if (!loopActive) {
-      return;
-    }
-
-    loopTimer = window.setTimeout(step, 0);
-  };
-
-  step();
-}
-
-function toggleLoop() {
-  if (loopActive) {
-    stopLoop();
-    return;
-  }
-
-  startLoop();
-}
-
-const advancedControls = [
-  minDistanceInput,
-  scoreRuleCurrentDominantInput,
-  scoreRuleTargetDominantInput,
-  scoreRuleSameNonDominantInput,
-  scoreRuleOtherwiseInput,
-  scoreRuleLengthMultiplierInput,
-].filter(Boolean);
-
-for (const input of advancedControls) {
-  input.addEventListener('input', () => {
-    if (input === minDistanceInput) {
-      setRangeBounds();
-    }
-    invalidateScoreChart();
-    renderAllRangeOverlays();
-  });
-}
-
-if (scoreChartSubtitle) {
-  scoreChartSubtitle.addEventListener('click', (event) => {
-    const button = event.target.closest('.score-chart-to-button');
-    if (button) {
-      const nextToValue = button.dataset.to;
-      if (!nextToValue) {
-        return;
-      }
-
-      setToValue(nextToValue);
-      return;
-    }
-
-    const hideButton = event.target.closest('.score-chart-hide-button');
-    if (!hideButton) {
-      return;
-    }
-
-    scoreChartHidden = !scoreChartHidden;
-    renderScoreChart();
-  });
-}
-
-function updateExportButton() {
-  if (exportButton) {
-    exportButton.textContent = `Export ${exportedToValues.length}`;
-    exportButton.disabled = exportedToValues.length === 0;
-  }
-}
-
-function exportToValues() {
-  if (!exportedToValues.length) {
-    return;
-  }
-
-  const lines = [String(exportedToValues.length), ...exportedToValues.map((value) => String(value))];
-  const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = 'to-values.txt';
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
-async function drawDominantColorLine() {
-  if (!loadedWidth || !loadedHeight) {
-    return;
-  }
-
-  if (currentPaletteCenters.length === 0) {
-    return;
-  }
-
-  const fromValue = clampInt(rangeFromInput.value, 1, perimeterCount, 1);
-  const toValue = clampInt(rangeToInput.value, 1, perimeterCount, perimeterCount);
-  const requestId = ++drawRequestSeq;
-  drawPendingRequestId = requestId;
-  const requestVersion = workerStateVersion;
-  let result = null;
-  try {
-    result = await postWorkerRequest('compute-draw', {
-      fromValue,
-      toValue,
-    });
-  } catch (error) {
-    result = null;
-  }
-
-  if (!result || requestVersion !== workerStateVersion || drawPendingRequestId !== requestId) {
-    if (drawPendingRequestId === requestId) {
-      drawPendingRequestId = 0;
-    }
-    return;
-  }
-
-  drawPendingRequestId = 0;
-  const { dominantKey, linePoints } = result;
-  if (!dominantKey || !linePoints || !linePoints.length) {
-    return;
-  }
-
-  exportedToValues.push(toValue);
-  updateExportButton();
-
-  const [r, g, b] = dominantKey.split(',').map((value) => Number.parseInt(value, 10));
-  const targetImageData = whiteCtx.getImageData(0, 0, loadedWidth, loadedHeight);
-  const targetData = targetImageData.data;
-
-  paintLinePixels({
-    linePoints,
-    width: loadedWidth,
-    targetData,
-    r,
-    g,
-    b,
-    a: 255,
-  });
-
-  whiteCtx.putImageData(targetImageData, 0, 0);
-  syncAnalysisWorkerState();
-  invalidateScoreChart();
-
-  const previousFromValue = rangeFromInput.value;
-  rangeFromInput.value = rangeToInput.value;
-  rangeToInput.value = previousFromValue;
-  rangeFromInput.dataset.touched = 'true';
-  rangeToInput.dataset.touched = 'true';
-  setRangeBounds();
-
-  renderLineAnalytics();
-  await renderScoreChart();
-
-  if (hovered && lastPointer) {
-    renderHoverOverlays(lastPointer.x, lastPointer.y);
-  }
-}
-
-function paintHoverBox(pixelBox, stageEl, overlayEl, px, py) {
-  const rect = stageEl.getBoundingClientRect();
-  const overlayRect = overlayEl.getBoundingClientRect();
-  const pixelWidth = rect.width / loadedWidth;
-  const pixelHeight = rect.height / loadedHeight;
-
-  pixelBox.style.opacity = '1';
-  pixelBox.style.left = `${rect.left - overlayRect.left + px * pixelWidth}px`;
-  pixelBox.style.top = `${rect.top - overlayRect.top + py * pixelHeight}px`;
-  pixelBox.style.width = `${Math.max(pixelWidth, 1)}px`;
-  pixelBox.style.height = `${Math.max(pixelHeight, 1)}px`;
-}
-
-function renderHoverOverlays(clientX, clientY) {
-  const imageRect = imageStage.getBoundingClientRect();
-  const whiteRect = whiteStage.getBoundingClientRect();
-  const inImage =
-    clientX >= imageRect.left &&
-    clientX <= imageRect.right &&
-    clientY >= imageRect.top &&
-    clientY <= imageRect.bottom;
-  const inWhite =
-    clientX >= whiteRect.left &&
-    clientX <= whiteRect.right &&
-    clientY >= whiteRect.top &&
-    clientY <= whiteRect.bottom;
-
-  let active = null;
-  if (inImage) {
-    active = 'image';
-  } else if (inWhite) {
-    active = 'white';
-  }
-
-  if (!active) {
-    imagePixelBox.style.opacity = '0';
-    whitePixelBox.style.opacity = '0';
-    if (statusLabel) {
-      statusLabel.classList.add('hidden');
-    }
-    hovered = false;
-    return;
-  }
-
-  const activeRect = active === 'image' ? imageRect : whiteRect;
-  const localX = clientX - activeRect.left;
-  const localY = clientY - activeRect.top;
-  const scaleX = activeRect.width / loadedWidth;
-  const scaleY = activeRect.height / loadedHeight;
-  const px = clamp(Math.floor(localX / scaleX), 0, loadedWidth - 1);
-  const py = clamp(Math.floor(localY / scaleY), 0, loadedHeight - 1);
-
-  if (!isInsideCircle(px, py)) {
-    imagePixelBox.style.opacity = '0';
-    whitePixelBox.style.opacity = '0';
-    if (statusLabel) {
-      statusLabel.classList.add('hidden');
-    }
-    hovered = false;
-    return;
-  }
-
-  const sample = active === 'image'
-    ? imageCtx.getImageData(px, py, 1, 1).data
-    : whiteCtx.getImageData(px, py, 1, 1).data;
-  if (sample[3] === 0) {
-    imagePixelBox.style.opacity = '0';
-    whitePixelBox.style.opacity = '0';
-    if (statusLabel) {
-      statusLabel.classList.add('hidden');
-    }
-    hovered = false;
-    return;
-  }
-
-  paintHoverBox(imagePixelBox, imageStage, imageOverlay, px, py);
-  paintHoverBox(whitePixelBox, whiteStage, whiteOverlay, px, py);
-
-  const [r, g, b, a] = sample;
-  const alpha = a / 255;
-  const hex = `#${[r, g, b].map((n) => n.toString(16).padStart(2, '0')).join('').toUpperCase()}`;
-  const rgba = `rgba(${r}, ${g}, ${b}, ${alpha.toFixed(2)})`;
-  const perimeterIndex = getPerimeterIndex(px, py);
-  const isCurrentPanel = active === 'white';
-
-  swatch.style.backgroundColor = rgba;
-  colorLabel.textContent = `${hex}  ${rgba}`;
-  coordLabel.textContent = perimeterIndex
-    ? `x: ${px + 1}, y: ${py + 1}  |  #${perimeterIndex}`
-    : `x: ${px + 1}, y: ${py + 1}  |  interior`;
-  if (statusLabel) {
-    if (isCurrentPanel) {
-      const sourceSample = imageCtx.getImageData(px, py, 1, 1).data;
-      const same =
-        sourceSample[0] === sample[0] &&
-        sourceSample[1] === sample[1] &&
-        sourceSample[2] === sample[2] &&
-        sourceSample[3] === sample[3];
-      statusLabel.textContent = same ? 'same' : 'not same';
-      statusLabel.classList.remove('hidden');
-    } else {
-      statusLabel.classList.add('hidden');
-    }
-  }
-  hovered = true;
-  lastPointer = { x: clientX, y: clientY };
-}
-
-function resetState() {
-  imagePixelBox.style.opacity = '0';
-  whitePixelBox.style.opacity = '0';
-  if (statusLabel) {
-    statusLabel.classList.add('hidden');
-  }
-  imageRangeOverlay.innerHTML = '';
-  whiteRangeOverlay.innerHTML = '';
-  if (lineAnalytics) {
-    lineAnalyticsPanels.innerHTML = '';
-  }
-  currentPaletteCenters = [];
-  currentPaletteKeys = [];
-  exportedToValues = [];
-  lineAnalyticsCacheKey = null;
-  lineAnalyticsLastResult = null;
-  scoreChartHighestToValue = null;
-  scoreChartLastKnownHighestToValue = null;
-  scoreChartCacheKey = null;
-  scoreChartActiveTo = null;
-  if (scoreChart) {
-    scoreChart.innerHTML = '';
-  }
-  updateScoreChartSubtitle(null);
-  updateExportButton();
-  workerStateVersion += 1;
-  scoreChartPendingCacheKey = null;
-  lineAnalyticsPendingCacheKey = null;
-  drawPendingRequestId = 0;
-  if (analysisWorker) {
-    analysisWorker.postMessage({
-      type: 'sync-state',
-      version: workerStateVersion,
-      payload: {
-        loadedWidth: 0,
-        loadedHeight: 0,
-        circleCenterX: 0,
-        circleCenterY: 0,
-        circleRadius: 0,
-        perimeterCount: 0,
-        perimeterPoints: [],
-        currentPaletteKeys: [],
-        imageData: null,
-        whiteData: null,
+        setPhase(`Stage 1: round ${info.roundIndex}`);
+        updateMatch();
       },
     });
+
+    renderCurrentCanvas();
+    updateMatch();
+  } finally {
+    running = false;
+    updateButtons();
   }
-  invalidateScoreChart();
-  scoreExpanded = false;
-  targetLineExpanded = false;
-  currentLineExpanded = false;
-  stopLoop();
-  endDrag();
-  panX = 0;
-  panY = 0;
-  applyPan();
-  imageCanvas.style.width = '';
-  imageCanvas.style.height = '';
-  whiteCanvas.style.width = '';
-  whiteCanvas.style.height = '';
-  imageStage.style.width = '';
-  imageStage.style.height = '';
-  whiteStage.style.width = '';
-  whiteStage.style.height = '';
-  imageStage.parentElement.style.width = '';
-  imageStage.parentElement.style.height = '';
-  whiteStage.parentElement.style.width = '';
-  whiteStage.parentElement.style.height = '';
-  imageStage.style.left = '';
-  imageStage.style.top = '';
-  whiteStage.style.left = '';
-  whiteStage.style.top = '';
 }
 
-function setRangeBounds() {
-  perimeterCount = getPerimeterCount();
-  const maxValue = Math.max(1, perimeterCount);
-  const maxMinDistance = Math.max(0, Math.floor(maxValue / 2));
-  const minDistance = getMinDistanceValue(maxValue);
-  let fromValue = wrapPerimeterValue(clampInt(rangeFromInput.value, 1, maxValue, 1), maxValue);
-  let toValue = wrapPerimeterValue(clampInt(rangeToInput.value, 1, maxValue, maxValue), maxValue);
+function maskOutsideCircle(data, width, height, circle) {
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (isInsideCircleGeometry(x, y, width, height, circle.centerX, circle.centerY, circle.radius)) {
+        continue;
+      }
 
-  if (getCircularDistance(fromValue, toValue, maxValue) < minDistance) {
-    if (rangeLastTouched === 'from') {
-      toValue = wrapPerimeterValue(fromValue + minDistance, maxValue);
-    } else if (rangeLastTouched === 'to') {
-      fromValue = wrapPerimeterValue(toValue - minDistance, maxValue);
-    } else {
-      toValue = wrapPerimeterValue(fromValue + minDistance, maxValue);
+      const offset = (y * width + x) * 4;
+      data[offset] = 0;
+      data[offset + 1] = 0;
+      data[offset + 2] = 0;
+      data[offset + 3] = 0;
     }
   }
-
-  rangeFromInput.min = '1';
-  rangeFromInput.max = String(maxValue);
-  rangeToInput.min = String(1);
-  rangeToInput.max = String(maxValue);
-  if (minDistanceInput) {
-    minDistanceInput.max = String(maxMinDistance);
-    minDistanceInput.value = String(minDistance);
-  }
-
-  rangeFromInput.value = String(fromValue);
-  rangeToInput.value = String(toValue);
-  rangeFromValue.textContent = String(fromValue);
-  rangeToValue.textContent = String(toValue);
 }
 
-function setQuantizeMode(mode) {
-  quantizeMode = mode;
-  modeClosestButton.classList.toggle('active', mode === 'closest');
-  modeDitheredButton.classList.toggle('active', mode === 'dithered');
+function prepareOptimizerFromImage(image) {
+  abortRequested = false;
 
-  if (loadedWidth && loadedHeight) {
-    quantizeAndRender();
-  }
-}
+  const cellsPerThickness = getCellsPerThickness();
+  const threadThicknessPercent = getThreadThicknessPercent();
+  const requestedSize = Math.round((cellsPerThickness * 200) / threadThicknessPercent);
+  loadedWidth = requestedSize;
+  loadedHeight = requestedSize;
 
-function loadSourceFromImage(image) {
-  loadedWidth = image.naturalWidth;
-  loadedHeight = image.naturalHeight;
   sourceCanvas.width = loadedWidth;
   sourceCanvas.height = loadedHeight;
   sourceCtx.clearRect(0, 0, loadedWidth, loadedHeight);
-  sourceCtx.drawImage(image, 0, 0);
+  const coverScale = Math.max(loadedWidth / image.naturalWidth, loadedHeight / image.naturalHeight);
+  const drawWidth = image.naturalWidth * coverScale;
+  const drawHeight = image.naturalHeight * coverScale;
+  const drawX = (loadedWidth - drawWidth) / 2;
+  const drawY = (loadedHeight - drawHeight) / 2;
+  sourceCtx.drawImage(image, drawX, drawY, drawWidth, drawHeight);
 
   const sourceImageData = sourceCtx.getImageData(0, 0, loadedWidth, loadedHeight);
-  const sourceData = sourceImageData.data;
+  const sourceData = new Uint8ClampedArray(sourceImageData.data);
+  const circle = buildCirclePerimeter(loadedWidth, loadedHeight);
+  maskOutsideCircle(sourceData, loadedWidth, loadedHeight, circle);
 
-  const perimeter = buildCirclePerimeter(loadedWidth, loadedHeight);
-  circleCenterX = perimeter.centerX;
-  circleCenterY = perimeter.centerY;
-  circleRadius = perimeter.radius;
-  perimeterPoints = perimeter.points;
-  perimeterLookup = perimeter.lookup;
-  perimeterCount = perimeter.count;
-
-  for (let y = 0; y < loadedHeight; y += 1) {
-    for (let x = 0; x < loadedWidth; x += 1) {
-      if (isInsideCircleAt(x, y)) {
-        continue;
-      }
-
-      const index = (y * loadedWidth + x) * 4;
-      sourceData[index] = 0;
-      sourceData[index + 1] = 0;
-      sourceData[index + 2] = 0;
-      sourceData[index + 3] = 0;
-    }
+  const colorCount = getColorCount();
+  const quantized = quantizeImageDataDetailed(sourceData, loadedWidth, loadedHeight, colorCount, 'dithered');
+  if (!quantized) {
+    throw new Error('Quantization failed');
   }
 
-  sourceCtx.putImageData(sourceImageData, 0, 0);
-  zoom = 1;
-  renderZoom();
+  const paletteRgb = quantized.centers.map((center) => oklabToRgb(center[0], center[1], center[2]));
+  const targetColors = buildTargetColors(quantized.mapped, loadedWidth, loadedHeight, paletteRgb);
 
-  imageCanvas.width = loadedWidth;
-  imageCanvas.height = loadedHeight;
-  whiteCanvas.width = loadedWidth;
-  whiteCanvas.height = loadedHeight;
+  renderTargetCanvas(quantized.mapped, loadedWidth, loadedHeight);
+  updateCanvasSizing(loadedWidth, loadedHeight);
 
-  const whiteData = whiteCtx.createImageData(loadedWidth, loadedHeight);
-  for (let y = 0; y < loadedHeight; y += 1) {
-    for (let x = 0; x < loadedWidth; x += 1) {
-      if (!isInsideCircleAt(x, y)) {
-        continue;
-      }
+  optimizer = new ColorPathOptimizer({
+    width: loadedWidth,
+    height: loadedHeight,
+    targetColors,
+    paletteRgb,
+    perimeterPoints: circle.points,
+    circle,
+    colorCount,
+    nailCount: getNailCount(),
+    candidateSamples: 1,
+    minDistance: getMinDistanceValueSetting(),
+    localSearchRadius: 1,
+  });
+  syncLiveOptimizerSettings();
+  interleavedActive = false;
+  workForeverActive = false;
+  stage2IterationsSinceBuild = 0;
+  resetWorktime();
 
-      const index = (y * loadedWidth + x) * 4;
-      whiteData.data[index] = 255;
-      whiteData.data[index + 1] = 255;
-      whiteData.data[index + 2] = 255;
-      whiteData.data[index + 3] = 255;
-    }
-  }
-  whiteCtx.putImageData(whiteData, 0, 0);
-  invalidateScoreChart();
-
+  currentSourceReady = true;
   showViewer();
-  setRangeBounds();
-  centerPanels();
-  renderAllRangeOverlays();
-  colorLabel.textContent = 'Hover a pixel';
-  coordLabel.textContent = `${loadedWidth} x ${loadedHeight} image loaded`;
-  quantizeAndRender();
+  renderCurrentCanvas();
+  updateMatch();
+  setPhase('Ready');
+  setDetail(`Build stage 1 to generate layered paths. Working grid ${loadedWidth}px by ${loadedHeight}px.`);
+  updateButtons();
 }
 
-function quantizeAndRender() {
-  if (!loadedWidth || !loadedHeight) {
-    resetState();
-    return;
+async function loadSourceFromImage(image) {
+  try {
+    prepareOptimizerFromImage(image);
+  } catch (error) {
+    resetWorkspace();
+    setPhase('Load failed');
+    setDetail(error instanceof Error ? error.message : String(error));
   }
-
-  const requestId = ++quantizeRequestId;
-  const requested = getPaletteCount();
-  const data = sourceCtx.getImageData(0, 0, loadedWidth, loadedHeight).data;
-  const result = quantizeImageDataDetailed(data, loadedWidth, loadedHeight, requested, quantizeMode);
-
-  if (!result) {
-    rebuildPaletteKeys([]);
-    resetState();
-    return;
-  }
-
-  const { mapped, centers } = result;
-  rebuildPaletteKeys(centers);
-  imageCanvas.width = loadedWidth;
-  imageCanvas.height = loadedHeight;
-  imageCtx.putImageData(new ImageData(mapped, loadedWidth, loadedHeight), 0, 0);
-  syncAnalysisWorkerState();
-  invalidateScoreChart();
-  stopLoop();
-
-  if (requestId !== quantizeRequestId) {
-    return;
-  }
-
-  renderAllRangeOverlays();
 }
 
 function handleFile(file) {
@@ -1390,53 +474,455 @@ function handleFile(file) {
   loaderImage.src = currentUrl;
 }
 
+async function runStage1() {
+  if (!optimizer || running) {
+    return;
+  }
+
+  running = true;
+  abortRequested = false;
+
+  try {
+    if (!optimizer && loaderImage.complete && loaderImage.naturalWidth > 0) {
+      prepareOptimizerFromImage(loaderImage);
+    }
+
+    const existingRounds = optimizer
+      ? optimizer.getPaths().reduce((max, path) => Math.max(max, Math.max(0, path.length - 1)), 0)
+      : 0;
+
+    setPhase('Stage 1: building paths');
+    setDetail(
+      existingRounds > 0
+        ? `Continuing from round ${existingRounds}. Choosing the best available next nails until the match stops improving.`
+        : 'Choosing the best available next nails until the match stops improving.'
+    );
+    startWorktime();
+    updateButtons();
+
+    const result = await optimizer.buildInitialPaths({
+      maxWorseningRounds: getMaxWorseningRounds(),
+      yieldEvery: 2,
+      shouldAbort: () => abortRequested,
+      onProgress: (info) => {
+        if (abortRequested) {
+          throw new Error('aborted');
+        }
+
+        if (info.roundIndex % 4 === 0) {
+          renderCurrentCanvas();
+        }
+
+        setPhase(`Stage 1: round ${info.roundIndex}`);
+        updateMatch();
+      },
+    });
+
+    renderCurrentCanvas();
+    updateMatch();
+    setPhase('Stage 1 complete');
+    if (result.stoppedEarly) {
+      setDetail(`Stopped after ${result.worseningRounds} worsening rounds in a row. The layered paths are in place.`);
+    } else {
+      setDetail('The layered paths are in place.');
+    }
+    stage2IterationsSinceBuild = 0;
+  } catch (error) {
+    if (abortRequested || (error instanceof Error && error.message === 'aborted')) {
+      setPhase('Stopped');
+      setDetail('The current build was stopped.');
+    } else {
+      setPhase('Stage 1 failed');
+      setDetail(error instanceof Error ? error.message : String(error));
+    }
+  } finally {
+    running = false;
+    updateButtons();
+  }
+}
+
+async function runStage2() {
+  if (!optimizer || running) {
+    return;
+  }
+
+  syncLiveOptimizerSettings();
+  optimizer.candidateSamples = stage2CandidateSamples;
+  const iterations = defaultRefineIterations;
+  running = true;
+  abortRequested = false;
+  startWorktime();
+  setPhase('Stage 2: refining');
+  setDetail('Searching a local minimum, then trying one random jump.');
+  updateButtons();
+
+  try {
+    await optimizer.refineMany({
+      iterations,
+      yieldEvery: 20,
+      shouldAbort: () => abortRequested,
+      onAcceptedMove: async () => {
+        renderCurrentCanvas();
+        updateMatch();
+        await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      },
+      onProgress: (info) => {
+        if (abortRequested) {
+          throw new Error('aborted');
+        }
+
+        stage2IterationsSinceBuild += 1;
+        setPhase(`Stage 2: iteration ${stage2IterationsSinceBuild}`);
+      },
+    });
+
+    renderCurrentCanvas();
+    updateMatch();
+    setPhase('Stage 2 complete');
+    setDetail('Refinement finished.');
+  } catch (error) {
+    if (abortRequested || (error instanceof Error && error.message === 'aborted')) {
+      setPhase('Stopped');
+      setDetail('The current refinement was stopped.');
+    } else {
+      setPhase('Stage 2 failed');
+      setDetail(error instanceof Error ? error.message : String(error));
+    }
+  } finally {
+    running = false;
+    updateButtons();
+  }
+}
+
+async function runStage2Loop() {
+  if (!optimizer || running) {
+    return;
+  }
+
+  syncLiveOptimizerSettings();
+  optimizer.candidateSamples = stage2CandidateSamples;
+  const iterations = defaultRefineIterations;
+  running = true;
+  refineLoopActive = true;
+  abortRequested = false;
+  startWorktime();
+  stage2IterationsSinceBuild = 0;
+  setPhase('Stage 2 loop: iteration 1');
+  setDetail('Repeating local refinement until you stop it.');
+  updateButtons();
+
+  try {
+    while (!abortRequested) {
+      const cycle = await optimizer.refineMany({
+        iterations,
+        yieldEvery: 20,
+        onAcceptedMove: async () => {
+          renderCurrentCanvas();
+          updateMatch();
+          await new Promise((resolve) => window.requestAnimationFrame(resolve));
+        },
+      onProgress: (info) => {
+          if (abortRequested) {
+            throw new Error('aborted');
+          }
+
+          stage2IterationsSinceBuild += 1;
+          setPhase(`Stage 2 loop: iteration ${stage2IterationsSinceBuild}`);
+        },
+      });
+
+      renderCurrentCanvas();
+      updateMatch();
+      setDetail(`Cycle complete. Changed ${cycle.changedCount} moves; delta ${cycle.totalDelta}.`);
+
+      if (abortRequested) {
+        break;
+      }
+
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    }
+
+    if (abortRequested) {
+      setPhase('Stopped');
+      setDetail('The refine loop was stopped.');
+    } else {
+      setPhase('Stage 2 loop complete');
+      setDetail('The loop ended.');
+    }
+  } catch (error) {
+    if (abortRequested || (error instanceof Error && error.message === 'aborted')) {
+      setPhase('Stopped');
+      setDetail('The refine loop was stopped.');
+    } else {
+      setPhase('Stage 2 loop failed');
+      setDetail(error instanceof Error ? error.message : String(error));
+    }
+  } finally {
+    running = false;
+    refineLoopActive = false;
+    updateButtons();
+  }
+}
+
+async function runInterleavedLoop() {
+  if (!optimizer || running) {
+    return;
+  }
+
+  const buildLines = getBuildChunkLines();
+  const refineSweeps = getRefineChunkSweeps();
+  running = true;
+  interleavedActive = true;
+  abortRequested = false;
+  startWorktime();
+  updateButtons();
+  setPhase('Interleaved: running');
+  setDetail(`Build ${buildLines} rounds, then refine ${refineSweeps} sweeps.`);
+
+  try {
+    while (!abortRequested) {
+      const cycleResult = await runInterleavedCycle(buildLines, refineSweeps);
+      if (!cycleResult.continue) {
+        break;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    }
+
+    if (abortRequested) {
+      setPhase('Stopped');
+      setDetail('The interleaved run was stopped.');
+    }
+  } catch (error) {
+    if (abortRequested || (error instanceof Error && error.message === 'aborted')) {
+      setPhase('Stopped');
+      setDetail('The interleaved run was stopped.');
+    } else {
+      setPhase('Interleaved failed');
+      setDetail(error instanceof Error ? error.message : String(error));
+    }
+  } finally {
+    running = false;
+    interleavedActive = false;
+    updateButtons();
+  }
+}
+
+async function runWorkForeverLoop() {
+  if (!optimizer || running) {
+    return;
+  }
+
+  workForeverActive = true;
+  running = true;
+  abortRequested = false;
+  updateButtons();
+  setPhase('Work forever: running');
+  setDetail('Interleaving build and refine until you stop it.');
+
+  try {
+    while (!abortRequested) {
+      const cycleResult = await runInterleavedCycle(getBuildChunkLines(), getRefineChunkSweeps());
+      if (!cycleResult.continue || abortRequested) {
+        break;
+      }
+
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    }
+
+    if (abortRequested) {
+      setPhase('Stopped');
+      setDetail('The forever run was stopped.');
+    }
+  } catch (error) {
+    if (abortRequested || (error instanceof Error && error.message === 'aborted')) {
+      setPhase('Stopped');
+      setDetail('The forever run was stopped.');
+    } else {
+      setPhase('Work forever failed');
+      setDetail(error instanceof Error ? error.message : String(error));
+    }
+  } finally {
+    running = false;
+    workForeverActive = false;
+    updateButtons();
+  }
+}
+
+async function runInterleavedCycle(buildLines, refineSweeps) {
+  let consecutiveBuildFailures = 0;
+
+  while (!abortRequested) {
+    const beforeRounds = optimizer.getPaths().reduce((max, path) => Math.max(max, Math.max(0, path.length - 1)), 0);
+    const buildResult = await optimizer.buildRounds(buildLines, {
+      maxWorseningRounds: getMaxWorseningRounds(),
+      yieldEvery: 2,
+      shouldAbort: () => abortRequested,
+      onProgress: (info) => {
+        if (abortRequested) {
+          throw new Error('aborted');
+        }
+
+        if (info.roundIndex % 4 === 0) {
+          renderCurrentCanvas();
+        }
+
+        setPhase(`Interleaved build: round ${info.roundIndex}`);
+        updateMatch();
+      },
+    });
+
+    renderCurrentCanvas();
+    updateMatch();
+
+    const afterRounds = optimizer.getPaths().reduce((max, path) => Math.max(max, Math.max(0, path.length - 1)), 0);
+    if (buildResult.stoppedEarly && afterRounds <= beforeRounds) {
+      consecutiveBuildFailures += 1;
+    } else {
+      consecutiveBuildFailures = 0;
+    }
+
+    if (consecutiveBuildFailures >= 2) {
+      setPhase('Interleaved complete');
+      setDetail('Build stopped making progress. The loop ended.');
+      return { continue: false };
+    }
+
+    for (let sweepIndex = 0; sweepIndex < refineSweeps; sweepIndex += 1) {
+      if (abortRequested) {
+        throw new Error('aborted');
+      }
+
+      setPhase(`Interleaved: refining sweep ${sweepIndex + 1}...`);
+      await optimizer.refineMany({
+        iterations: 1,
+        yieldEvery: 20,
+        shouldAbort: () => abortRequested,
+        onAcceptedMove: async () => {
+          renderCurrentCanvas();
+          updateMatch();
+          await new Promise((resolve) => window.requestAnimationFrame(resolve));
+        },
+      });
+    }
+
+    renderCurrentCanvas();
+    updateMatch();
+    return { continue: true };
+  }
+
+  return { continue: false };
+}
+
+function stopCurrentRun() {
+  if (!running && !refineLoopActive && !interleavedActive) {
+    return;
+  }
+
+  abortRequested = true;
+  pauseWorktime();
+  setPhase('Stopping...');
+  setDetail('Stopping now.');
+  updateButtons();
+}
+
+function exportPaths() {
+  if (!optimizer) {
+    return;
+  }
+
+  const payload = {
+    width: optimizer.width,
+    height: optimizer.height,
+    matchRatio: optimizer.getMatchRatio(),
+    settings: {
+      colorCount: getColorCount(),
+      nailCount: optimizer.nailCount,
+      minDistance: getMinDistanceValueSetting(),
+      maxWorseningRounds: getMaxWorseningRounds(),
+      localSearchRadius: optimizer.localSearchRadius,
+      cellsPerThickness: getCellsPerThickness(),
+      threadThicknessPercent: getThreadThicknessPercent(),
+      workingSize: loadedWidth,
+    },
+    paletteRgb: optimizer.paletteRgb,
+    paths: optimizer.getPaths(),
+  };
+
+  const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], {
+    type: 'application/json;charset=utf-8',
+  });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = 'color-paths.json';
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function resetGenerationOnly() {
+  if (!optimizer) {
+    return;
+  }
+
+  optimizer.resetSimulation();
+  renderCurrentCanvas();
+  updateMatch();
+  setPhase('Ready');
+  setDetail('Canvas reset. Build stage 1 again to generate a fresh sequence.');
+}
+
 imageInput.addEventListener('change', (event) => {
   const [file] = event.target.files || [];
   handleFile(file);
 });
 
-paletteInput.addEventListener('input', quantizeAndRender);
-
-rangeFromInput.addEventListener('input', () => {
-  rangeFromInput.dataset.touched = 'true';
-  rangeLastTouched = 'from';
-  setRangeBounds();
-  renderAllRangeOverlays();
-});
-
-rangeToInput.addEventListener('input', () => {
-  rangeToInput.dataset.touched = 'true';
-  rangeLastTouched = 'to';
-  setRangeBounds();
-  renderAllRangeOverlays();
-});
-
-drawLineButton.addEventListener('click', () => {
-  void drawDominantColorLine();
-});
-if (loopLineButton) {
-  loopLineButton.addEventListener('click', toggleLoop);
-}
 chooseImageButton.addEventListener('click', () => {
   imageInput.click();
 });
 
-if (exportButton) {
-  exportButton.addEventListener('click', exportToValues);
-  updateExportButton();
-}
+paletteCountInput.addEventListener('input', () => {
+  updateButtons();
+  scheduleSourceReload();
+});
 
-modeClosestButton.addEventListener('click', () => setQuantizeMode('closest'));
-modeDitheredButton.addEventListener('click', () => setQuantizeMode('dithered'));
-
-loaderImage.addEventListener('load', () => {
-  if (ignoreNextImageLoad) {
-    ignoreNextImageLoad = false;
+buildButton.addEventListener('click', () => {
+  if (running) {
+    stopCurrentRun();
     return;
   }
 
-  loadSourceFromImage(loaderImage);
+  void runStage1();
 });
+
+refineLoopButton.addEventListener('click', () => {
+  if (refineLoopActive) {
+    stopCurrentRun();
+    return;
+  }
+
+  void runStage2Loop();
+});
+
+interleavedButton.addEventListener('click', () => {
+  if (interleavedActive) {
+    stopCurrentRun();
+    return;
+  }
+
+  void runInterleavedLoop();
+});
+
+workForeverButton.addEventListener('click', () => {
+  if (workForeverActive) {
+    stopCurrentRun();
+    return;
+  }
+
+  void runWorkForeverLoop();
+});
+
+resetButton.addEventListener('click', resetGenerationOnly);
+exportButton.addEventListener('click', exportPaths);
 
 dropZone.addEventListener('dragover', (event) => {
   event.preventDefault();
@@ -1456,133 +942,45 @@ dropZone.addEventListener('drop', (event) => {
   handleFile(file);
 });
 
-dropZone.addEventListener('pointermove', (event) => {
-  if (dragging) {
-    return;
-  }
-  renderHoverOverlays(event.clientX, event.clientY);
+nailCountInput.addEventListener('input', () => {
+  updateMinDistanceReadout();
+  updateWorseningRoundsReadout();
+  updateButtons();
+});
+minDistanceInput.addEventListener('input', () => {
+  syncLiveOptimizerSettings();
+  updateMinDistanceReadout();
+  updateButtons();
+});
+worseningRoundsInput.addEventListener('input', () => {
+  updateWorseningRoundsReadout();
+  updateButtons();
+});
+cellsPerThicknessInput.addEventListener('input', () => {
+  updateResolutionReadouts();
+  scheduleSourceReload();
+});
+threadThicknessInput.addEventListener('input', () => {
+  updateResolutionReadouts();
+  scheduleSourceReload();
+});
+loaderImage.addEventListener('load', () => {
+  void loadSourceFromImage(loaderImage);
 });
 
-dropZone.addEventListener('pointerleave', () => {
-  if (dragging) {
-    return;
-  }
-  imagePixelBox.style.opacity = '0';
-  whitePixelBox.style.opacity = '0';
-  if (statusLabel) {
-    statusLabel.classList.add('hidden');
-  }
-  hovered = false;
-});
-
-viewer.addEventListener('pointerdown', (event) => {
-  if (!loadedWidth || !loadedHeight || event.button !== 0) {
-    return;
-  }
-
-  dragging = true;
-  dragPointerId = event.pointerId;
-  dragStartX = event.clientX;
-  dragStartY = event.clientY;
-  dragStartPanX = panX;
-  dragStartPanY = panY;
-  viewer.classList.add('dragging');
-  viewer.setPointerCapture(event.pointerId);
-  imagePixelBox.style.opacity = '0';
-  whitePixelBox.style.opacity = '0';
-  event.preventDefault();
-});
-
-viewer.addEventListener('pointermove', (event) => {
-  if (!dragging || event.pointerId !== dragPointerId) {
-    return;
-  }
-
-  panX = dragStartPanX + (event.clientX - dragStartX);
-  panY = dragStartPanY + (event.clientY - dragStartY);
-  applyPan();
-  renderAllRangeOverlays();
-  if (hovered && lastPointer) {
-    renderHoverOverlays(lastPointer.x, lastPointer.y);
-  }
-  event.preventDefault();
-});
-
-viewer.addEventListener('pointerup', (event) => {
-  if (event.pointerId !== dragPointerId) {
-    return;
-  }
-
-  endDrag();
-  if (hovered && lastPointer) {
-    renderHoverOverlays(lastPointer.x, lastPointer.y);
-  }
-});
-
-viewer.addEventListener('pointercancel', () => {
-  endDrag();
-});
-
-dropZone.addEventListener(
-  'wheel',
-  (event) => {
-    if (!loadedWidth || !loadedHeight) {
-      return;
-    }
-
-    event.preventDefault();
-    const whiteRect = whiteStage.getBoundingClientRect();
-    const inWhite =
-      event.clientX >= whiteRect.left &&
-      event.clientX <= whiteRect.right &&
-      event.clientY >= whiteRect.top &&
-      event.clientY <= whiteRect.bottom;
-    const activeStage = inWhite ? whiteStage : imageStage;
-
-    const beforeRect = activeStage.getBoundingClientRect();
-    if (beforeRect.width <= 0 || beforeRect.height <= 0) {
-      return;
-    }
-
-    const anchorX = (event.clientX - beforeRect.left) / beforeRect.width;
-    const anchorY = (event.clientY - beforeRect.top) / beforeRect.height;
-    const factor = event.deltaY > 0 ? 1 / 1.12 : 1.12;
-    const nextZoom = clamp(zoom * factor, zoomMin, zoomMax);
-
-    zoom = nextZoom;
-    renderZoom();
-
-    const afterRect = activeStage.getBoundingClientRect();
-    const desiredLeft = event.clientX - anchorX * afterRect.width;
-    const desiredTop = event.clientY - anchorY * afterRect.height;
-    const offsetX = desiredLeft - afterRect.left;
-    const offsetY = desiredTop - afterRect.top;
-    panX += offsetX;
-    panY += offsetY;
-    applyPan();
-    renderAllRangeOverlays();
-
-    if (hovered && lastPointer) {
-      renderHoverOverlays(lastPointer.x, lastPointer.y);
-    }
-  },
-  { passive: false }
-);
-
-window.addEventListener('resize', () => {
-  if (loadedWidth && loadedHeight && !hovered) {
-    centerPanels();
-  }
-
-  renderAllRangeOverlays();
-
-  if (hovered && lastPointer) {
-    renderHoverOverlays(lastPointer.x, lastPointer.y);
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    stopCurrentRun();
   }
 });
 
 function boot() {
+  setPhase('Loading default image');
+  setDetail('Use the file picker or drop another image onto the workspace.');
+  updateResolutionReadouts();
   loaderImage.src = defaultImageSrc;
+  updateButtons();
 }
 
+resetWorkspace();
 boot();
