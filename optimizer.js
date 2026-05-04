@@ -104,6 +104,34 @@ function shuffleArray(array) {
   }
 }
 
+function srgbChannelToLinear(value) {
+  const c = value / 255;
+  if (c <= 0.04045) {
+    return c / 12.92;
+  }
+  return ((c + 0.055) / 1.055) ** 2.4;
+}
+
+function rgbToOklab(r, g, b) {
+  const lr = srgbChannelToLinear(r);
+  const lg = srgbChannelToLinear(g);
+  const lb = srgbChannelToLinear(b);
+
+  const l = 0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb;
+  const m = 0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb;
+  const s = 0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb;
+
+  const lRoot = Math.cbrt(l);
+  const mRoot = Math.cbrt(m);
+  const sRoot = Math.cbrt(s);
+
+  return [
+    0.2104542553 * lRoot + 0.793617785 * mRoot - 0.0040720468 * sRoot,
+    1.9779984951 * lRoot - 2.428592205 * mRoot + 0.4505937099 * sRoot,
+    0.0259040371 * lRoot + 0.7827717662 * mRoot - 0.808675766 * sRoot,
+  ];
+}
+
 export class ColorPathOptimizer {
   constructor({
     width,
@@ -142,8 +170,15 @@ export class ColorPathOptimizer {
     this.currentColors = new Int16Array(this.pixelCount);
     this.currentColors.fill(-1);
     this.currentImageData = new Uint8ClampedArray(this.pixelCount * 4);
+    this.currentErrorByPixel = new Float32Array(this.pixelCount);
+    this.totalError = 0;
+    this.pixelVersion = new Uint32Array(this.pixelCount);
+    this.lineScoreCache = new Map();
     this.comparableCount = 0;
     this.matchedCount = 0;
+    this.paletteLab = this.paletteRgb.map((rgb) => rgbToOklab(rgb[0], rgb[1], rgb[2]));
+    this.backgroundLab = rgbToOklab(255, 255, 255);
+    this.colorDistance = this.buildColorDistanceMatrix();
 
     for (let pixel = 0; pixel < this.pixelCount; pixel += 1) {
       const targetColor = this.targetColors[pixel];
@@ -154,10 +189,41 @@ export class ColorPathOptimizer {
         this.currentImageData[offset + 1] = 255;
         this.currentImageData[offset + 2] = 255;
         this.currentImageData[offset + 3] = 255;
+        this.currentErrorByPixel[pixel] = this.getDistance(targetColor, -1);
+        this.totalError += this.currentErrorByPixel[pixel];
       } else {
         this.currentImageData[offset + 3] = 0;
       }
     }
+  }
+
+  buildColorDistanceMatrix() {
+    const matrix = Array.from({ length: this.colorCount }, () => new Float32Array(this.colorCount));
+    for (let a = 0; a < this.colorCount; a += 1) {
+      for (let b = 0; b < this.colorCount; b += 1) {
+        const da = this.paletteLab[a];
+        const db = this.paletteLab[b];
+        const dL = da[0] - db[0];
+        const dA = da[1] - db[1];
+        const dB = da[2] - db[2];
+        matrix[a][b] = (dL * dL) + (dA * dA) + (dB * dB);
+      }
+    }
+    return matrix;
+  }
+
+  getDistance(targetColor, currentColor) {
+    if (targetColor < 0) {
+      return 0;
+    }
+    if (currentColor < 0) {
+      const t = this.paletteLab[targetColor];
+      const dL = t[0] - this.backgroundLab[0];
+      const dA = t[1] - this.backgroundLab[1];
+      const dB = t[2] - this.backgroundLab[2];
+      return (dL * dL) + (dA * dA) + (dB * dB);
+    }
+    return this.colorDistance[targetColor][currentColor];
   }
 
   resetSimulation() {
@@ -171,6 +237,9 @@ export class ColorPathOptimizer {
     this.pathLineIds = Array.from({ length: this.colorCount }, () => []);
     this.refineSweepOrder = [];
     this.refineSweepIndex = 0;
+    this.lineScoreCache.clear();
+    this.pixelVersion.fill(0);
+    this.totalError = 0;
 
     for (let pixel = 0; pixel < this.pixelCount; pixel += 1) {
       const targetColor = this.targetColors[pixel];
@@ -180,6 +249,8 @@ export class ColorPathOptimizer {
         this.currentImageData[offset + 1] = 255;
         this.currentImageData[offset + 2] = 255;
         this.currentImageData[offset + 3] = 255;
+        this.currentErrorByPixel[pixel] = this.getDistance(targetColor, -1);
+        this.totalError += this.currentErrorByPixel[pixel];
       } else {
         this.currentImageData[offset] = 0;
         this.currentImageData[offset + 1] = 0;
@@ -287,7 +358,17 @@ export class ColorPathOptimizer {
   }
 
   scoreLineImmediately(colorIndex, fromIndex, toIndex) {
+    const lineKey = this.getLineKey(fromIndex, toIndex);
     const pixels = this.getLinePixels(fromIndex, toIndex);
+    let contextVersion = 0;
+    for (const pixel of pixels) {
+      contextVersion += this.pixelVersion[pixel];
+    }
+    const cacheKey = `${lineKey}|${colorIndex}`;
+    const cached = this.lineScoreCache.get(cacheKey);
+    if (cached && cached.contextVersion === contextVersion) {
+      return cached.value;
+    }
     let delta = 0;
 
     for (const pixel of pixels) {
@@ -295,16 +376,14 @@ export class ColorPathOptimizer {
       if (targetColor < 0) {
         continue;
       }
-
       const currentColor = this.currentColors[pixel];
-      if (currentColor === targetColor && colorIndex !== targetColor) {
-        delta -= 1;
-      } else if (currentColor !== targetColor && colorIndex === targetColor) {
-        delta += 1;
-      }
+      const oldError = this.getDistance(targetColor, currentColor);
+      const newError = this.getDistance(targetColor, colorIndex);
+      delta += (oldError - newError);
     }
-
-    return { delta, length: pixels.length, score: delta };
+    const value = { delta, length: pixels.length, score: delta };
+    this.lineScoreCache.set(cacheKey, { contextVersion, value });
+    return value;
   }
 
   chooseNextNail(colorIndex, fromIndex, previousIndex = -1) {
@@ -586,6 +665,7 @@ export class ColorPathOptimizer {
       }
 
       const targetColor = this.targetColors[pixel];
+      const oldError = this.currentErrorByPixel[pixel];
       if (oldColor === targetColor) {
         this.matchedCount -= 1;
       }
@@ -594,6 +674,10 @@ export class ColorPathOptimizer {
       }
 
       this.currentColors[pixel] = nextColor;
+      const nextError = this.getDistance(targetColor, nextColor);
+      this.currentErrorByPixel[pixel] = nextError;
+      this.totalError += nextError - oldError;
+      this.pixelVersion[pixel] += 1;
       const offset = pixel * 4;
       if (nextColor >= 0) {
         const rgb = this.paletteRgb[nextColor] || [255, 255, 255];
@@ -650,8 +734,11 @@ export class ColorPathOptimizer {
         pixel,
         coverage: this.coverage[pixel].slice(),
         color: this.currentColors[pixel],
+        error: this.currentErrorByPixel[pixel],
+        version: this.pixelVersion[pixel],
       }));
       const matchedBefore = this.matchedCount;
+      const errorBefore = this.totalError;
 
       this.applyLineGeometrySwap({
         lineIdA: -1,
@@ -663,12 +750,14 @@ export class ColorPathOptimizer {
       });
 
       this.refreshAffectedPixels(affectedPixels);
-      const delta = this.matchedCount - matchedBefore;
+      const delta = errorBefore - this.totalError;
 
       if (!commit) {
         for (const snapshot of snapshots) {
           this.coverage[snapshot.pixel] = snapshot.coverage;
           this.currentColors[snapshot.pixel] = snapshot.color;
+          this.currentErrorByPixel[snapshot.pixel] = snapshot.error;
+          this.pixelVersion[snapshot.pixel] = snapshot.version;
 
           const offset = snapshot.pixel * 4;
           const color = snapshot.color;
@@ -691,6 +780,7 @@ export class ColorPathOptimizer {
           }
         }
         this.matchedCount = matchedBefore;
+        this.totalError = errorBefore;
         return delta;
       }
 
@@ -730,8 +820,11 @@ export class ColorPathOptimizer {
       pixel,
       coverage: this.coverage[pixel].slice(),
       color: this.currentColors[pixel],
+      error: this.currentErrorByPixel[pixel],
+      version: this.pixelVersion[pixel],
     }));
     const matchedBefore = this.matchedCount;
+    const errorBefore = this.totalError;
 
     this.applyLineGeometrySwap({
       lineIdA,
@@ -743,12 +836,14 @@ export class ColorPathOptimizer {
     });
 
     this.refreshAffectedPixels(affectedPixels);
-    const delta = this.matchedCount - matchedBefore;
+    const delta = errorBefore - this.totalError;
 
     if (!commit) {
       for (const snapshot of snapshots) {
         this.coverage[snapshot.pixel] = snapshot.coverage;
         this.currentColors[snapshot.pixel] = snapshot.color;
+        this.currentErrorByPixel[snapshot.pixel] = snapshot.error;
+        this.pixelVersion[snapshot.pixel] = snapshot.version;
 
         const offset = snapshot.pixel * 4;
         const color = snapshot.color;
@@ -771,6 +866,7 @@ export class ColorPathOptimizer {
         }
       }
       this.matchedCount = matchedBefore;
+      this.totalError = errorBefore;
       return delta;
     }
 

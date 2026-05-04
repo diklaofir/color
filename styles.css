@@ -268,3 +268,8 @@ canvas {
     min-height: 60vh;
   }
 }
+
+.history-panel { margin-top: 10px; }
+.history-label { font-size: 12px; opacity: 0.85; margin-bottom: 4px; }
+.history-graph { width: 100%; height: 120px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; }
+#matchHistoryLine { fill: none; stroke: #6ee7b7; stroke-width: 2; }
