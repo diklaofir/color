@@ -1,1 +1,26 @@
-show a graph in the UI: match% vs stopwatch time
+1. show a graph in the UI: match% vs stopwatch time
+
+2. default:
+Build lines
+100
+Refine sweeps
+1
+
+3. answer the question:
+if in a sweep none of the nails were changed -
+does it mean we can be 100% sure in future sweeps none will be changed too?
+if so - in that case, auto "Stop refine" and show a "max refinement level reached".
+
+4. the text "Stopping..." - I don't like seeing it.
+dont remove it, but make sure Stop refine really stops as soon as possible.
+dont wait to finish iteration.
+
+5. if there is no difference between sweep/iteration/cycle, be consistent with one of them.
+
+6. in an "Interleaved: refining" part:
+show the "Changed 15 moves; delta 210" kind of message, like you do in regular refinment
+
+7. Score is based on delta only, right?
+so does it take into account the fact that the delta between black and white is bigger then between dark grey and black?
+or it doesnt care?
+because it doesn't, let's think of a good way to take it into account while keeping it fast.
