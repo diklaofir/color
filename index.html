@@ -32,18 +32,18 @@
 
       <label class="field field-slider">
         <span>Max worsening rounds</span>
-        <input id="worseningRounds" type="range" min="1" max="10" step="1" value="3" />
+        <input id="worseningRounds" type="range" min="1" max="10" step="1" value="1" />
         <strong id="worseningRoundsValue">3 rounds</strong>
       </label>
 
       <label class="field">
         <span>Build lines</span>
-        <input id="buildChunkLines" type="number" min="1" step="1" value="10" />
+        <input id="buildChunkLines" type="number" min="1" step="1" value="100" />
       </label>
 
       <label class="field">
         <span>Refine sweeps</span>
-        <input id="refineChunkSweeps" type="number" min="1" step="1" value="3" />
+        <input id="refineChunkSweeps" type="number" min="1" step="1" value="1" />
       </label>
 
       <label class="field field-slider">
@@ -76,6 +76,13 @@
         <div id="phaseLabel" class="status-item">Idle</div>
         <div id="matchLabel" class="status-item">Match 0.00%</div>
         <div id="detailLabel" class="status-detail">Drop an image or choose a file to start.</div>
+      </div>
+
+      <div class="history-panel">
+        <div class="history-label">Match % vs stopwatch time</div>
+        <svg id="matchHistoryGraph" class="history-graph" viewBox="0 0 420 120" preserveAspectRatio="none" aria-label="Match history graph">
+          <polyline id="matchHistoryLine" points="" />
+        </svg>
       </div>
     </section>
 

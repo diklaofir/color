@@ -32,6 +32,7 @@ const cellsPerThicknessValue = document.getElementById('cellsPerThicknessValue')
 const threadThicknessValue = document.getElementById('threadThicknessValue');
 const workingGridValue = document.getElementById('workingGridValue');
 const currentLinesValue = document.getElementById('currentLinesValue');
+const matchHistoryLine = document.getElementById('matchHistoryLine');
 
 const targetCtx = targetCanvas.getContext('2d', { willReadFrequently: true });
 const currentCtx = currentCanvas.getContext('2d', { willReadFrequently: true });
@@ -86,6 +87,21 @@ function getWorktimeMs() {
   return worktimeAccumulatedMs + (worktimeStartMs !== 0 ? Date.now() - worktimeStartMs : 0);
 }
 
+
+let matchHistory = [];
+
+function pushMatchHistory() {
+  if (!matchHistoryLine) return;
+  const elapsedSec = getWorktimeMs() / 1000;
+  const ratio = optimizer ? optimizer.getMatchRatio() : 0;
+  if (matchHistory.length && elapsedSec - matchHistory[matchHistory.length - 1].t < 0.1) return;
+  matchHistory.push({ t: elapsedSec, m: ratio });
+  if (matchHistory.length > 500) matchHistory = matchHistory.slice(-500);
+  const maxT = Math.max(1, matchHistory[matchHistory.length - 1]?.t || 1);
+  const points = matchHistory.map((p) => `${(p.t / maxT) * 420},${120 - (p.m * 120)}`).join(' ');
+  matchHistoryLine.setAttribute('points', points);
+}
+
 function formatPercent(value) {
   return `${(value * 100).toFixed(2)}%`;
 }
@@ -125,11 +141,11 @@ function getMaxWorseningRounds() {
 }
 
 function getBuildChunkLines() {
-  return clampInt(buildChunkLinesInput.value, 1, 100000, 10);
+  return clampInt(buildChunkLinesInput.value, 1, 100000, 100);
 }
 
 function getRefineChunkSweeps() {
-  return clampInt(refineChunkSweepsInput.value, 1, 100000, 3);
+  return clampInt(refineChunkSweepsInput.value, 1, 100000, 1);
 }
 
 function getCellsPerThickness() {
@@ -205,6 +221,7 @@ function setDetail(text) {
 function updateMatch() {
   const ratio = optimizer ? optimizer.getMatchRatio() : 0;
   matchLabel.textContent = `Match ${formatPercent(ratio)}`;
+  pushMatchHistory();
 }
 
 function updateCurrentLineCount() {
@@ -282,6 +299,8 @@ function resetWorkspace() {
   workForeverActive = false;
   stage2IterationsSinceBuild = 0;
   resetWorktime();
+  matchHistory = [];
+  if (matchHistoryLine) { matchHistoryLine.setAttribute('points', ''); }
   optimizer = null;
   loadedWidth = 0;
   loadedHeight = 0;
@@ -559,7 +578,7 @@ async function runStage2() {
   try {
     await optimizer.refineMany({
       iterations,
-      yieldEvery: 20,
+      yieldEvery: 1,
       shouldAbort: () => abortRequested,
       onAcceptedMove: async () => {
         renderCurrentCanvas();
@@ -607,15 +626,16 @@ async function runStage2Loop() {
   abortRequested = false;
   startWorktime();
   stage2IterationsSinceBuild = 0;
-  setPhase('Stage 2 loop: iteration 1');
+  setPhase('Stage 2 loop: sweep 1');
   setDetail('Repeating local refinement until you stop it.');
   updateButtons();
 
+  let maxRefinementReached = false;
   try {
     while (!abortRequested) {
       const cycle = await optimizer.refineMany({
         iterations,
-        yieldEvery: 20,
+        yieldEvery: 1,
         onAcceptedMove: async () => {
           renderCurrentCanvas();
           updateMatch();
@@ -627,13 +647,20 @@ async function runStage2Loop() {
           }
 
           stage2IterationsSinceBuild += 1;
-          setPhase(`Stage 2 loop: iteration ${stage2IterationsSinceBuild}`);
+          setPhase(`Stage 2 loop: sweep ${stage2IterationsSinceBuild}`);
         },
       });
 
       renderCurrentCanvas();
       updateMatch();
-      setDetail(`Cycle complete. Changed ${cycle.changedCount} moves; delta ${cycle.totalDelta}.`);
+      setDetail(`Sweep complete. Changed ${cycle.changedCount} moves; delta ${cycle.totalDelta}.`);
+
+      if (cycle.changedCount === 0) {
+        maxRefinementReached = true;
+        setPhase('Stage 2 loop complete');
+        setDetail('Max refinement level reached (0 changes in a full sweep).');
+        break;
+      }
 
       if (abortRequested) {
         break;
@@ -645,7 +672,7 @@ async function runStage2Loop() {
     if (abortRequested) {
       setPhase('Stopped');
       setDetail('The refine loop was stopped.');
-    } else {
+    } else if (!maxRefinementReached) {
       setPhase('Stage 2 loop complete');
       setDetail('The loop ended.');
     }
@@ -792,10 +819,10 @@ async function runInterleavedCycle(buildLines, refineSweeps) {
         throw new Error('aborted');
       }
 
-      setPhase(`Interleaved: refining sweep ${sweepIndex + 1}...`);
-      await optimizer.refineMany({
+      setPhase(`Interleaved: refining sweep ${sweepIndex + 1}`);
+      const sweepResult = await optimizer.refineMany({
         iterations: 1,
-        yieldEvery: 20,
+        yieldEvery: 1,
         shouldAbort: () => abortRequested,
         onAcceptedMove: async () => {
           renderCurrentCanvas();
@@ -803,6 +830,12 @@ async function runInterleavedCycle(buildLines, refineSweeps) {
           await new Promise((resolve) => window.requestAnimationFrame(resolve));
         },
       });
+      setDetail(`Interleaved sweep ${sweepIndex + 1}: Changed ${sweepResult.changedCount} moves; delta ${sweepResult.totalDelta}.`);
+      if (sweepResult.changedCount === 0) {
+        setPhase('Interleaved complete');
+        setDetail('Max refinement level reached (0 changes in a full sweep).');
+        return { continue: false };
+      }
     }
 
     renderCurrentCanvas();
